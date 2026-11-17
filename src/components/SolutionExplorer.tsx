@@ -562,7 +562,7 @@ export const SolutionExplorer: React.FC = () => {
               />
               <CtxSep />
               <CtxItem label="Manage NuGet Packages for Solution..." onClick={() => { setCtxMenu(null); openNugetTab(); }} />
-              <CtxItem label="Open Folder in Finder" onClick={() => { setCtxMenu(null); void window.vsApi.fs.revealInFinder(solution.dir); }} />
+              <CtxItem label={window.vsApi?.platform === 'win32' ? 'Open Folder in File Explorer' : 'Open Folder in Finder'} onClick={() => { setCtxMenu(null); void window.vsApi.fs.revealInFinder(solution.dir); }} />
             </>
           )}
 
@@ -597,7 +597,7 @@ export const SolutionExplorer: React.FC = () => {
               <CtxItem label="Manage NuGet Packages..." onClick={() => { setCtxMenu(null); openNugetTab(ctxMenu.project!.id); }} />
               <CtxItem label="Edit Project File (.csproj)" onClick={() => { setCtxMenu(null); void openFile(ctxMenu.project!.path); }} />
               <CtxItem label="Properties" onClick={() => { setCtxMenu(null); setDock({ rightOpen: true, rightPanel: 'properties' }); }} />
-              <CtxItem label="Open Folder in Finder" onClick={() => { setCtxMenu(null); void window.vsApi.fs.revealInFinder(ctxMenu.project!.dir); }} />
+              <CtxItem label={window.vsApi?.platform === 'win32' ? 'Open Folder in File Explorer' : 'Open Folder in Finder'} onClick={() => { setCtxMenu(null); void window.vsApi.fs.revealInFinder(ctxMenu.project!.dir); }} />
             </>
           )}
 
@@ -636,7 +636,7 @@ export const SolutionExplorer: React.FC = () => {
               />
               <CtxSep />
               <CtxItem
-                label="Reveal in Finder"
+                label={window.vsApi?.platform === 'win32' ? 'Reveal in File Explorer' : 'Reveal in Finder'}
                 onClick={() => {
                   setCtxMenu(null);
                   void window.vsApi.fs.revealInFinder(ctxMenu.node!.path);

@@ -408,7 +408,9 @@ export const ToolsOptionsDialog: React.FC = () => {
             >
               <option value="externalWindow">VS Debug Console Window (Visual Studio Default)</option>
               <option value="integratedTerminal">Integrated Terminal (Bottom Dock)</option>
-              <option value="macTerminal">macOS Terminal.app</option>
+              <option value="macTerminal">
+                {window.vsApi?.platform === 'win32' ? 'Windows Console (Native Terminal)' : 'macOS Terminal.app'}
+              </option>
             </select>
 
             <span>Auto-close console on exit:</span>

@@ -20,8 +20,10 @@ export class TerminalManager {
     onExit: (code: number) => void,
   ): void {
     this.kill(id);
-    const defaultShell =
-      process.platform === 'darwin'
+    const isWin = process.platform === 'win32';
+    const defaultShell = isWin
+      ? process.env.COMSPEC || 'cmd.exe'
+      : process.platform === 'darwin'
         ? fsSync.existsSync('/bin/zsh')
           ? '/bin/zsh'
           : '/bin/bash'
@@ -29,14 +31,16 @@ export class TerminalManager {
           ? '/bin/bash'
           : '/bin/sh';
 
-    const args = ['-i'];
+    const args = isWin ? ['/K'] : ['-i'];
     const { proc } = spawnWithPty(defaultShell, args, {
       // '.' would resolve to the Electron process cwd ('/' when launched from Finder)
       cwd: cwd && cwd !== '.' && fsSync.existsSync(cwd) ? cwd : os.homedir(),
       env: {
         ...getAugmentedEnv(),
         TERM: 'xterm-256color',
-        PS1: process.platform === 'darwin' ? '%n@%m %1~ %# ' : '\\u@\\h:\\w\\$ ',
+        ...(isWin
+          ? {}
+          : { PS1: process.platform === 'darwin' ? '%n@%m %1~ %# ' : '\\u@\\h:\\w\\$ ' }),
       },
     });
 

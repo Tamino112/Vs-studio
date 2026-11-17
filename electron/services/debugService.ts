@@ -140,6 +140,51 @@ export class DotnetDebugManager {
     opener.unref();
   }
 
+  async launchInWindowsTerminal(params: {
+    csprojPath: string;
+    projectName?: string;
+    targetFramework?: string;
+    configuration: string;
+  }): Promise<void> {
+    const dotnetBin = await getDotnetBin();
+    const cwd = path.dirname(params.csprojPath);
+    const projName = params.projectName || path.basename(params.csprojPath, '.csproj');
+    const tfm = params.targetFramework || 'net10.0';
+    const dllPath = path.join(cwd, 'bin', params.configuration, tfm, `${projName}.dll`);
+    const batPath = path.join(os.tmpdir(), `vs-console-${Date.now()}.cmd`);
+
+    const runCmd = fsSync.existsSync(dllPath)
+      ? `"${dotnetBin}" "${dllPath}"`
+      : `"${dotnetBin}" run --project "${params.csprojPath}" -c "${params.configuration}" --no-build`;
+
+    const batContent = [
+      '@echo off',
+      `title Microsoft Visual Studio Debug Console - ${projName}`,
+      `cd /d "${cwd}"`,
+      'set DOTNET_CLI_TELEMETRY_OPTOUT=1',
+      'set DOTNET_NOLOGO=1',
+      runCmd,
+      'set EXIT_CODE=%ERRORLEVEL%',
+      'echo.',
+      `echo ${dllPath} (process exited with code %EXIT_CODE%).`,
+      'echo Press any key to close this window . . .',
+      'pause >nul',
+      `del "%~f0" >nul 2>&1`,
+      'exit /b %EXIT_CODE%',
+      '',
+    ].join('\r\n');
+
+    fsSync.writeFileSync(batPath, batContent, 'utf-8');
+    this.callbacks?.onOutput(`[Run] Launching Windows Console for ${projName}...`);
+    const opener = spawn('cmd.exe', ['/c', 'start', `Microsoft Visual Studio Debug Console - ${projName}`, 'cmd.exe', '/c', batPath], {
+      cwd,
+      env: getAugmentedEnv(),
+      detached: true,
+      stdio: 'ignore',
+    });
+    opener.unref();
+  }
+
   async startWithoutDebugging(
     csprojPath: string,
     configuration: string,
@@ -156,15 +201,27 @@ export class DotnetDebugManager {
     const cwd = path.dirname(csprojPath);
     const dllPath = path.join(cwd, 'bin', configuration, tfm, `${projName}.dll`);
 
-    if (options?.consoleMode === 'macTerminal' && process.platform === 'darwin') {
-      await this.launchInMacTerminal({
-        csprojPath,
-        projectName: projName,
-        targetFramework: tfm,
-        configuration,
-      });
-      this.callbacks?.onStateChange('stopped');
-      return;
+    if (options?.consoleMode === 'macTerminal') {
+      if (process.platform === 'darwin') {
+        await this.launchInMacTerminal({
+          csprojPath,
+          projectName: projName,
+          targetFramework: tfm,
+          configuration,
+        });
+        this.callbacks?.onStateChange('stopped');
+        return;
+      }
+      if (process.platform === 'win32') {
+        await this.launchInWindowsTerminal({
+          csprojPath,
+          projectName: projName,
+          targetFramework: tfm,
+          configuration,
+        });
+        this.callbacks?.onStateChange('stopped');
+        return;
+      }
     }
 
     const env = getAugmentedEnv();

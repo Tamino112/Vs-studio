@@ -332,7 +332,9 @@ export interface IdeState {
 }
 
 const savedTheme = (localStorage.getItem('vs.theme') as VsThemeId) || 'dark';
-const savedKeymap = (localStorage.getItem('vs.keymap') as KeymapMode) || 'macos';
+const defaultKeymap: KeymapMode =
+  typeof window !== 'undefined' && window.vsApi?.platform === 'win32' ? 'windows' : 'macos';
+const savedKeymap = (localStorage.getItem('vs.keymap') as KeymapMode) || defaultKeymap;
 const savedTabLayout = (localStorage.getItem('vs.tabLayout') as TabLayoutPosition) || 'top';
 const savedColorize = localStorage.getItem('vs.colorizeTabs') !== 'false';
 const savedConsoleMode = (localStorage.getItem('vs.consoleMode') as ConsoleLaunchMode) || 'externalWindow';
