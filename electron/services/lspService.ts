@@ -30,26 +30,37 @@ export class CSharpLspClient {
   async start(rootDir: string, csharpLsPath: string): Promise<boolean> {
     this.stop();
     try {
-      this.proc = spawn(csharpLsPath, [], {
+      const proc = spawn(csharpLsPath, [], {
         cwd: rootDir,
         env: getAugmentedEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+      this.proc = proc;
 
-      this.proc.stdout.on('data', (chunk: Buffer) => this.handleData(chunk));
-      this.proc.stderr.on('data', (chunk: Buffer) => {
-        const text = chunk.toString('utf-8').trim();
-        if (text) this.onLogCb?.(`[csharp-ls] ${text}`);
+      proc.stdin.on('error', () => {
+        // ignore EPIPE if csharp-ls crashed
       });
-      this.proc.on('close', (code) => {
+      proc.stdout.on('data', (chunk: Buffer) => {
+        if (this.proc === proc) this.handleData(chunk);
+      });
+      proc.stderr.on('data', (chunk: Buffer) => {
+        const text = chunk.toString('utf-8').trim();
+        if (text && this.proc === proc) this.onLogCb?.(`[csharp-ls] ${text}`);
+      });
+      proc.on('close', (code) => {
+        // Ignore the exit of a previous (restarted) server instance
+        if (this.proc !== proc) return;
         this.onLogCb?.(`[csharp-ls] exited with code ${code ?? 0}`);
         this.initialized = false;
         this.proc = null;
+        this.rejectAll('csharp-ls exited');
       });
-      this.proc.on('error', (err) => {
+      proc.on('error', (err) => {
+        if (this.proc !== proc) return;
         this.onLogCb?.(`[csharp-ls] error: ${err.message}`);
         this.initialized = false;
         this.proc = null;
+        this.rejectAll(`csharp-ls error: ${err.message}`);
       });
 
       const rootUri = pathToFileURL(rootDir).toString();
@@ -113,11 +124,22 @@ export class CSharpLspClient {
     }
     this.initialized = false;
     this.openVersions.clear();
+    this.rejectAll('LSP client stopped');
+    this.buffer = Buffer.alloc(0);
+  }
+
+  private rejectAll(reason: string): void {
     for (const p of this.pending.values()) {
-      p.reject(new Error('LSP client stopped'));
+      p.reject(new Error(reason));
     }
     this.pending.clear();
-    this.buffer = Buffer.alloc(0);
+  }
+
+  private respond(id: number | string, result: unknown): void {
+    if (!this.proc) return;
+    const payload = JSON.stringify({ jsonrpc: '2.0', id, result });
+    const header = `Content-Length: ${Buffer.byteLength(payload, 'utf-8')}\r\n\r\n`;
+    this.proc.stdin.write(header + payload, 'utf-8');
   }
 
   didOpen(filePath: string, text: string): void {
@@ -290,7 +312,15 @@ export class CSharpLspClient {
           params?: unknown;
         };
 
-        if (msg.id !== undefined && this.pending.has(msg.id)) {
+        if (msg.method && msg.id !== undefined) {
+          // Server -> client request (client/registerCapability, workspace/configuration, …).
+          // Must be answered and must never be mistaken for a response to our own request ids.
+          const items = (msg.params as { items?: unknown[] } | undefined)?.items;
+          this.respond(
+            msg.id,
+            msg.method === 'workspace/configuration' ? (Array.isArray(items) ? items.map(() => null) : []) : null,
+          );
+        } else if (msg.id !== undefined && this.pending.has(msg.id)) {
           const pending = this.pending.get(msg.id)!;
           this.pending.delete(msg.id);
           if (msg.error) pending.reject(new Error(msg.error.message || 'LSP error'));

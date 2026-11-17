@@ -30,7 +30,8 @@ export class TerminalManager {
 
     const args = ['-i'];
     const { proc } = spawnWithPty(defaultShell, args, {
-      cwd: fsSync.existsSync(cwd) ? cwd : os.homedir(),
+      // '.' would resolve to the Electron process cwd ('/' when launched from Finder)
+      cwd: cwd && cwd !== '.' && fsSync.existsSync(cwd) ? cwd : os.homedir(),
       env: {
         ...getAugmentedEnv(),
         TERM: 'xterm-256color',
@@ -38,14 +39,27 @@ export class TerminalManager {
       },
     });
 
-    proc.stdout.on('data', (chunk: Buffer) => onData(chunk.toString('utf-8')));
-    proc.stderr.on('data', (chunk: Buffer) => onData(chunk.toString('utf-8')));
+    const isCurrent = () => this.sessions.get(id)?.proc === proc;
+    // Decode as a UTF-8 stream so multi-byte characters split across chunks stay intact
+    proc.stdout.setEncoding('utf8');
+    proc.stderr.setEncoding('utf8');
+    proc.stdin.on('error', () => {
+      // ignore EPIPE when the shell already exited
+    });
+    proc.stdout.on('data', (chunk: string) => {
+      if (isCurrent()) onData(chunk);
+    });
+    proc.stderr.on('data', (chunk: string) => {
+      if (isCurrent()) onData(chunk);
+    });
     proc.on('close', (code) => {
+      // A killed/replaced shell must not remove or "exit" the new session with the same id
+      if (!isCurrent()) return;
       this.sessions.delete(id);
       onExit(code ?? 0);
     });
     proc.on('error', (err) => {
-      onData(`\r\n[Terminal error: ${err.message}]\r\n`);
+      if (isCurrent()) onData(`\r\n[Terminal error: ${err.message}]\r\n`);
     });
 
     this.sessions.set(id, { id, proc });

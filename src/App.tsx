@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { selectAllEffectiveDiagnostics, useIdeStore } from './store/useIdeStore';
 import { StartWindow } from './components/StartWindow';
 import { NewProjectWizard } from './components/NewProjectWizard';
@@ -44,6 +44,14 @@ export const App: React.FC = () => {
 
 const MainIdeApp: React.FC = () => {
   const store = useIdeStore();
+  // Lazily mount the integrated terminal the first time it is shown, then keep it alive
+  const [terminalEverShown, setTerminalEverShown] = useState(false);
+  useEffect(() => {
+    if (store.bottomOpen && store.bottomPanel === 'terminal') setTerminalEverShown(true);
+  }, [store.bottomOpen, store.bottomPanel]);
+  useEffect(() => {
+    if (!store.solution) setTerminalEverShown(false);
+  }, [store.solution]);
 
   useEffect(() => {
     void store.initApp();
@@ -88,6 +96,17 @@ const MainIdeApp: React.FC = () => {
           statusText: 'Ready',
         });
       }),
+      // Window close / ⌘Q: VS asks to save unsaved documents first
+      window.vsApi.on('app:requestClose', () => {
+        void window.vsApi.window.closeAck();
+        void useIdeStore
+          .getState()
+          .confirmCloseTabs(useIdeStore.getState().openTabs.map((t) => t.id))
+          .then((ok) => {
+            if (ok) void window.vsApi.window.forceClose();
+            else void window.vsApi.window.cancelClose();
+          });
+      }),
       window.vsApi.on('menu:command', (cmd) => {
         const s = useIdeStore.getState();
         if (cmd === 'file.newProject') s.setDialog({ newProjectOpen: true });
@@ -124,7 +143,10 @@ const MainIdeApp: React.FC = () => {
         (targetEl?.tagName === 'INPUT' || targetEl?.tagName === 'TEXTAREA') &&
         !inEditor;
 
-      if (mod && e.key.toLowerCase() === 'q') {
+      // Use e.code for letters: on macOS ⌥ changes e.key (⌥⌘B -> '∫', ⌥⌘R -> '®')
+      const code = e.code;
+      if (e.ctrlKey && !e.metaKey && code === 'KeyQ') {
+        // VS Search (Ctrl+Q). Never bind ⌘Q – that is macOS Quit.
         e.preventDefault();
         s.setDialog({ quickLaunchOpen: !s.quickLaunchOpen });
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'o') {
@@ -144,23 +166,25 @@ const MainIdeApp: React.FC = () => {
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
         void s.saveAllTabs();
-      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 's' && !inEditor) {
+      } else if (mod && !e.shiftKey && code === 'KeyS') {
+        // In the editor Monaco handles ⌘S itself (and calls preventDefault -> we never get here)
         if (s.activeTabId) {
           e.preventDefault();
           void s.saveTab(s.activeTabId);
         }
-      } else if (mod && e.key.toLowerCase() === 'w') {
+      } else if (mod && code === 'KeyW') {
         if (s.activeTabId) {
           e.preventDefault();
           s.closeTab(s.activeTabId);
         }
-      } else if (mod && e.key.toLowerCase() === 'b') {
+      } else if (mod && code === 'KeyB') {
         e.preventDefault();
+        if (e.repeat) return;
         void s.buildSolution(e.altKey ? 'rebuild' : 'build');
       } else if (e.shiftKey && e.altKey && e.key.toLowerCase() === 'f' && !inEditor) {
         e.preventDefault();
         s.dispatchEditorCommand('format');
-      } else if (mod && e.key === '/' && !inEditor) {
+      } else if (mod && (e.key === '/' || code === 'Slash') && !inEditor) {
         e.preventDefault();
         s.dispatchEditorCommand('comment');
       } else if ((e.ctrlKey || (s.keymap === 'macos' && e.metaKey)) && (e.key === '`' || e.code === 'Backquote')) {
@@ -176,10 +200,13 @@ const MainIdeApp: React.FC = () => {
       } else if (e.key === 'F9' && !inEditor) {
         e.preventDefault();
         s.dispatchEditorCommand('toggleBreakpoint');
-      } else if ((e.key === 'F5' && !e.shiftKey) || (s.keymap === 'macos' && e.metaKey && e.key.toLowerCase() === 'r')) {
+      } else if ((e.key === 'F5' && !e.shiftKey) || (s.keymap === 'macos' && e.metaKey && code === 'KeyR')) {
         e.preventDefault();
-        if (s.debugState === 'paused') void s.continueDebugging();
-        else if (s.debugState === 'stopped') void s.startDebugging(!(e.ctrlKey || e.altKey));
+        if (e.repeat) return;
+        // Ctrl+F5 / ⌘F5 / ⌥⌘R = Start Without Debugging
+        const withDebugger = !(e.ctrlKey || e.altKey || (e.key === 'F5' && e.metaKey));
+        if (s.debugState === 'paused' && withDebugger) void s.continueDebugging();
+        else if (s.debugState === 'stopped') void s.startDebugging(withDebugger);
       } else if (e.key === 'F5' && e.shiftKey) {
         e.preventDefault();
         void s.stopDebugging();
@@ -376,13 +403,14 @@ const MainIdeApp: React.FC = () => {
                 <CodeEditorPane />
               </div>
 
-              {store.bottomOpen ? (
+              {/* Kept mounted (hidden) once the terminal was opened so its shell and running program survive */}
+              {(store.bottomOpen || terminalEverShown) && (
                 <div
                   style={{
                     height: store.bottomHeight,
                     minHeight: 120,
                     borderTop: '1px solid var(--vs-border)',
-                    display: 'flex',
+                    display: store.bottomOpen ? 'flex' : 'none',
                     flexDirection: 'column',
                     background: 'var(--vs-bg)',
                   }}
@@ -402,7 +430,11 @@ const MainIdeApp: React.FC = () => {
                   <div style={{ flex: 1, minHeight: 0 }}>
                     {store.bottomPanel === 'errorList' && <ErrorListPanel />}
                     {store.bottomPanel === 'output' && <OutputPanel />}
-                    {store.bottomPanel === 'terminal' && <TerminalPanel />}
+                    {terminalEverShown && (
+                      <div style={{ display: store.bottomPanel === 'terminal' ? 'block' : 'none', height: '100%' }}>
+                        <TerminalPanel />
+                      </div>
+                    )}
                     {store.bottomPanel === 'testExplorer' && <TestExplorerPanel />}
                     {store.bottomPanel === 'findResults' && <FindResultsPanel />}
                     {store.bottomPanel === 'taskList' && <TaskListPanel />}
@@ -460,7 +492,8 @@ const MainIdeApp: React.FC = () => {
                     })}
                   </div>
                 </div>
-              ) : (
+              )}
+              {!store.bottomOpen && (
                 /* Bottom Auto-Hide Restore Bar */
                 <div
                   style={{

@@ -1,9 +1,10 @@
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { XMLParser } from 'fast-xml-parser';
 import {
   addProjectToSlnFile,
   createSlnContent,
@@ -63,13 +64,85 @@ export function getAugmentedEnv(): NodeJS.ProcessEnv {
     .filter(Boolean)
     .filter((v, i, a) => a.indexOf(v) === i)
     .join(path.delimiter);
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: merged,
-    DOTNET_ROOT: process.env.DOTNET_ROOT || (fsSync.existsSync('/usr/local/share/dotnet') ? '/usr/local/share/dotnet' : path.join(home, '.dotnet')),
     DOTNET_CLI_TELEMETRY_OPTOUT: '1',
     DOTNET_NOLOGO: '1',
   };
+  const dotnetRoot = resolveDotnetRoot(home);
+  if (dotnetRoot) env.DOTNET_ROOT = dotnetRoot;
+  else delete env.DOTNET_ROOT;
+  return env;
+}
+
+/** Finds the real .NET install dir (official pkg, ~/.dotnet install script or Homebrew). */
+function resolveDotnetRoot(home: string): string | null {
+  if (process.env.DOTNET_ROOT && fsSync.existsSync(process.env.DOTNET_ROOT)) return process.env.DOTNET_ROOT;
+  const candidates = [
+    '/usr/local/share/dotnet',
+    path.join(home, '.dotnet'),
+    '/opt/homebrew/opt/dotnet/libexec',
+    '/usr/local/opt/dotnet/libexec',
+  ];
+  for (const c of candidates) {
+    if (fsSync.existsSync(path.join(c, 'dotnet'))) return c;
+  }
+  return null;
+}
+
+// ---- Tracked dotnet child processes (build/clean/test/tool) so they can be killed on quit ----
+const trackedProcs = new Set<ChildProcess>();
+
+export function killAllDotnetProcesses(): void {
+  for (const p of trackedProcs) {
+    try {
+      p.kill();
+    } catch {
+      // ignore
+    }
+  }
+  trackedProcs.clear();
+}
+
+/**
+ * Spawns a dotnet command, decodes stdout/stderr as UTF-8 streams (no broken umlauts at
+ * chunk boundaries) and reports complete lines only (no lines split in two in Output).
+ */
+function spawnDotnetLines(
+  bin: string,
+  args: string[],
+  opts: { cwd?: string; env: NodeJS.ProcessEnv },
+  onLine: (line: string) => void,
+  onClose: (code: number, output: string, error?: Error) => void,
+): void {
+  const proc = spawn(bin, args, { cwd: opts.cwd, env: opts.env });
+  trackedProcs.add(proc);
+  let output = '';
+  const remainders = { out: '', err: '' };
+  const make = (key: 'out' | 'err') => (text: string) => {
+    output += text;
+    const parts = (remainders[key] + text).split(/\r?\n/);
+    remainders[key] = parts.pop() ?? '';
+    for (const line of parts) if (line.length > 0) onLine(line);
+  };
+  proc.stdout.setEncoding('utf8');
+  proc.stderr.setEncoding('utf8');
+  proc.stdout.on('data', make('out'));
+  proc.stderr.on('data', make('err'));
+  let done = false;
+  const finish = (code: number, err?: Error) => {
+    if (done) return;
+    done = true;
+    trackedProcs.delete(proc);
+    for (const key of ['out', 'err'] as const) {
+      if (remainders[key].length > 0) onLine(remainders[key]);
+      remainders[key] = '';
+    }
+    onClose(code, output, err);
+  };
+  proc.on('error', (err) => finish(1, err));
+  proc.on('close', (code) => finish(code ?? 1));
 }
 
 async function resolveExecutable(name: string, candidates: string[]): Promise<string | null> {
@@ -360,24 +433,48 @@ export async function createSolutionWithProject(params: {
   const slnPath = path.join(solutionDir, `${solutionName}.sln`);
   const csprojPath = path.join(projectDir, `${projectName}.csproj`);
 
-  let createdViaCli = false;
+  // Each step is tried separately so a failing "dotnet new sln" never overwrites a
+  // project that "dotnet new <template>" already generated.
   try {
     const args = ['new', template, '-n', projectName, '-o', projectDir, '--framework', framework];
     if (useProgramMain && template === 'console') {
       args.push('--use-program-main');
     }
     await execFileAsync(dotnetBin, args, { env });
-    if (!fsSync.existsSync(slnPath)) {
-      await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir, '--format', 'sln'], { env });
-    }
-    await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
-    createdViaCli = fsSync.existsSync(csprojPath) && fsSync.existsSync(slnPath);
   } catch {
-    createdViaCli = false;
+    // fallback below
+  }
+  if (!fsSync.existsSync(csprojPath)) {
+    await scaffoldFallbackProject({ template, projectName, projectDir, framework, useProgramMain });
   }
 
-  if (!createdViaCli) {
-    await scaffoldFallbackProject({ template, projectName, projectDir, framework, useProgramMain });
+  if (!fsSync.existsSync(slnPath)) {
+    try {
+      await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir, '--format', 'sln'], { env });
+    } catch {
+      try {
+        // SDKs before 9.0.200 do not know --format (and create .sln by default)
+        await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir], { env });
+      } catch {
+        // fallback below
+      }
+    }
+  }
+  let addedToSln = false;
+  if (fsSync.existsSync(slnPath)) {
+    try {
+      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
+      addedToSln = true;
+    } catch {
+      try {
+        await addProjectToSlnFile(slnPath, csprojPath);
+        addedToSln = true;
+      } catch {
+        addedToSln = false;
+      }
+    }
+  }
+  if (!addedToSln) {
     const rel = path.relative(solutionDir, csprojPath);
     const slnContent = createSlnContent([{ name: projectName, relPath: rel, guid: generateGuid() }]);
     await fs.writeFile(slnPath, slnContent, 'utf-8');
@@ -400,23 +497,20 @@ export async function addNewProjectToSolution(params: {
 
   const env = getAugmentedEnv();
   const dotnetBin = await getDotnetBin();
-  let createdViaCli = false;
-
   try {
     const args = ['new', template, '-n', projectName, '-o', projectDir, '--framework', framework];
     if (useProgramMain && template === 'console') args.push('--use-program-main');
     await execFileAsync(dotnetBin, args, { env });
-    if (slnPath.endsWith('.sln') || slnPath.endsWith('.slnx')) {
-      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
-    }
-    createdViaCli = fsSync.existsSync(csprojPath);
   } catch {
-    createdViaCli = false;
+    // fallback below
   }
-
-  if (!createdViaCli) {
+  if (!fsSync.existsSync(csprojPath)) {
     await scaffoldFallbackProject({ template, projectName, projectDir, framework, useProgramMain });
-    if (slnPath.endsWith('.sln') || slnPath.endsWith('.slnx')) {
+  }
+  if (slnPath.endsWith('.sln') || slnPath.endsWith('.slnx')) {
+    try {
+      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
+    } catch {
       await addProjectToSlnFile(slnPath, csprojPath);
     }
   }
@@ -440,7 +534,8 @@ export async function addProjectReference(sourceCsproj: string, targetCsproj: st
   try {
     await execFileAsync(dotnetBin, ['add', sourceCsproj, 'reference', targetCsproj], { env });
   } catch {
-    const rel = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\\/g, '\\');
+    // MSBuild convention (what "dotnet add reference" writes): backslash separators
+    const rel = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\//g, '\\');
     let xml = await fs.readFile(sourceCsproj, 'utf-8');
     if (xml.includes(rel)) return;
     const refTag = `  <ItemGroup>\n    <ProjectReference Include="${rel}" />\n  </ItemGroup>\n`;
@@ -455,7 +550,7 @@ export async function removeProjectReference(sourceCsproj: string, targetCsproj:
   try {
     await execFileAsync(dotnetBin, ['remove', sourceCsproj, 'reference', targetCsproj], { env });
   } catch {
-    const relWin = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\\/g, '\\');
+    const relWin = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\//g, '\\');
     const relUnix = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\\/g, '/');
     let xml = await fs.readFile(sourceCsproj, 'utf-8');
     xml = xml.replace(new RegExp(`\\s*<ProjectReference\\s+Include="(?:${escapeRegex(relWin)}|${escapeRegex(relUnix)})"\\s*/>`, 'g'), '');
@@ -482,24 +577,14 @@ export async function runDotnetBuild(params: {
 
   const runCmd = (args: string[]) =>
     new Promise<{ code: number; output: string }>((resolve) => {
-      const proc = spawn(dotnetBin, args, { cwd: targetDir, env });
-      let combined = '';
-      const handleChunk = (buf: Buffer) => {
-        const text = buf.toString('utf-8');
-        combined += text;
-        for (const line of text.split(/\r?\n/)) {
-          if (line.length > 0) params.onOutput(line);
+      spawnDotnetLines(dotnetBin, args, { cwd: targetDir, env }, params.onOutput, (code, output, err) => {
+        if (err) {
+          const msg = `Failed to execute dotnet: ${err.message}`;
+          params.onOutput(msg);
+          resolve({ code: 1, output: msg });
+          return;
         }
-      };
-      proc.stdout.on('data', handleChunk);
-      proc.stderr.on('data', handleChunk);
-      proc.on('error', (err) => {
-        const msg = `Failed to execute dotnet: ${err.message}`;
-        params.onOutput(msg);
-        resolve({ code: 1, output: msg });
-      });
-      proc.on('close', (code) => {
-        resolve({ code: code ?? 1, output: combined });
+        resolve({ code, output });
       });
     });
 
@@ -538,19 +623,13 @@ export async function runDotnetClean(params: {
   const targetDir = path.dirname(params.targetPath);
   return new Promise((resolve) => {
     params.onOutput(`------ Clean started: ${path.basename(params.targetPath)}, Configuration: ${params.configuration} ------`);
-    const proc = spawn(dotnetBin, ['clean', params.targetPath, '-c', params.configuration], {
-      cwd: targetDir,
-      env,
-    });
-    const handle = (buf: Buffer) => {
-      for (const line of buf.toString('utf-8').split(/\r?\n/)) {
-        if (line) params.onOutput(line);
-      }
-    };
-    proc.stdout.on('data', handle);
-    proc.stderr.on('data', handle);
-    proc.on('close', (code) => resolve({ success: code === 0 }));
-    proc.on('error', () => resolve({ success: false }));
+    spawnDotnetLines(
+      dotnetBin,
+      ['clean', params.targetPath, '-c', params.configuration],
+      { cwd: targetDir, env },
+      params.onOutput,
+      (code, _out, err) => resolve({ success: !err && code === 0 }),
+    );
   });
 }
 
@@ -565,55 +644,140 @@ export async function runDotnetTest(params: {
     ? params.targetPath
     : path.dirname(params.targetPath);
 
+  const resultsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'vs-testresults-'));
   return new Promise((resolve) => {
     params.onOutput(`========== Starting test run: ${path.basename(params.targetPath)} ==========`);
-    const proc = spawn(
+    spawnDotnetLines(
       dotnetBin,
-      ['test', params.targetPath, '-c', params.configuration, '--verbosity', 'normal'],
+      [
+        'test',
+        params.targetPath,
+        '-c',
+        params.configuration,
+        '--verbosity',
+        'normal',
+        '--logger',
+        'trx',
+        '--results-directory',
+        resultsDir,
+      ],
       { cwd: targetDir, env },
+      params.onOutput,
+      (code, output, err) => {
+        if (err) {
+          params.onOutput(`Test run failed: ${err.message}`);
+          fsSync.rmSync(resultsDir, { recursive: true, force: true });
+          resolve({ success: false, tests: [] });
+          return;
+        }
+        let tests: TestCaseResult[] = [];
+        try {
+          const trxFiles = fsSync.readdirSync(resultsDir).filter((f) => f.endsWith('.trx'));
+          for (const f of trxFiles) {
+            tests.push(...parseTrx(fsSync.readFileSync(path.join(resultsDir, f), 'utf-8')));
+          }
+        } catch {
+          tests = [];
+        }
+        if (tests.length === 0) {
+          tests = parseTestConsoleOutput(output, path.basename(params.targetPath, path.extname(params.targetPath)));
+        }
+        fsSync.rmSync(resultsDir, { recursive: true, force: true });
+        const summary = {
+          passed: tests.filter((t) => t.status === 'passed').length,
+          failed: tests.filter((t) => t.status === 'failed').length,
+          skipped: tests.filter((t) => t.status === 'skipped').length,
+        };
+        params.onOutput(
+          `========== Test run finished: ${tests.length} Tests (${summary.passed} Passed, ${summary.failed} Failed, ${summary.skipped} Skipped) ==========`,
+        );
+        resolve({ success: code === 0, tests });
+      },
     );
-    let output = '';
-    const handle = (buf: Buffer) => {
-      const txt = buf.toString('utf-8');
-      output += txt;
-      for (const line of txt.split(/\r?\n/)) {
-        if (line) params.onOutput(line);
-      }
-    };
-    proc.stdout.on('data', handle);
-    proc.stderr.on('data', handle);
-    proc.on('close', (code) => {
-      const tests: TestCaseResult[] = [];
-      const lineRegex = /^\s*(Passed|Failed|Skipped)\s+([^\s\[]+)(?:\s+\[([^\]]+)\])?/gim;
-      let m: RegExpExecArray | null;
-      while ((m = lineRegex.exec(output)) !== null) {
-        const statusRaw = m[1].toLowerCase();
-        const fullName = m[2];
-        const parts = fullName.split('.');
-        const methodName = parts[parts.length - 1] || fullName;
-        const suiteName = parts.slice(0, -1).join('.') || 'Tests';
-        const durationMatch = m[3]?.match(/(\d+)\s*ms/);
-        tests.push({
-          id: fullName,
-          name: methodName,
-          suite: suiteName,
-          project: path.basename(params.targetPath, path.extname(params.targetPath)),
-          status:
-            statusRaw === 'passed'
-              ? 'passed'
-              : statusRaw === 'failed'
-              ? 'failed'
-              : 'skipped',
-          durationMs: durationMatch ? Number(durationMatch[1]) : undefined,
-        });
-      }
-      resolve({ success: code === 0, tests });
-    });
-    proc.on('error', (err) => {
-      params.onOutput(`Test run failed: ${err.message}`);
-      resolve({ success: false, tests: [] });
-    });
   });
+}
+
+/** "00:00:01.2345678" -> 1234 ms */
+function parseTrxDuration(d: string | undefined): number | undefined {
+  if (!d) return undefined;
+  const m = /^(\d+):(\d+):(\d+(?:\.\d+)?)$/.exec(d.trim());
+  if (!m) return undefined;
+  return Math.round((Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) * 1000);
+}
+
+/** Parses a Visual Studio TRX result file (what VS Test Explorer itself uses). */
+export function parseTrx(xml: string): TestCaseResult[] {
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@', isArray: (name) =>
+    ['UnitTestResult', 'UnitTest'].includes(name) });
+  const doc = parser.parse(xml) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const run = doc?.TestRun;
+  if (!run) return [];
+  const defs = new Map<string, { className: string; name: string; storage: string }>();
+  for (const ut of run.TestDefinitions?.UnitTest ?? []) {
+    defs.set(String(ut['@id']), {
+      className: String(ut.TestMethod?.['@className'] ?? ''),
+      name: String(ut.TestMethod?.['@name'] ?? ut['@name'] ?? ''),
+      storage: String(ut['@storage'] ?? ''),
+    });
+  }
+  const results: TestCaseResult[] = [];
+  for (const r of run.Results?.UnitTestResult ?? []) {
+    const def = defs.get(String(r['@testId']));
+    const testName = String(r['@testName'] ?? def?.name ?? 'Test');
+    const outcome = String(r['@outcome'] ?? '').toLowerCase();
+    const className = def?.className ?? '';
+    // Theory/TestCase display names already contain the class name in xUnit – strip it for the tree
+    let name = testName;
+    if (className && name.startsWith(className + '.')) name = name.slice(className.length + 1);
+    const storage = def?.storage ?? '';
+    const project = storage ? path.basename(storage).replace(/\.dll$/i, '') : 'Tests';
+    const errInfo = r.Output?.ErrorInfo;
+    results.push({
+      id: `${project}:${className}.${testName}`,
+      name,
+      suite: className || 'Tests',
+      project,
+      status: outcome === 'passed' ? 'passed' : outcome === 'failed' || outcome === 'error' || outcome === 'timeout' ? 'failed' : 'skipped',
+      durationMs: parseTrxDuration(r['@duration']),
+      errorMessage: errInfo?.Message !== undefined ? String(errInfo.Message) : undefined,
+      stackTrace: errInfo?.StackTrace !== undefined ? String(errInfo.StackTrace) : undefined,
+    });
+  }
+  return results;
+}
+
+/** Fallback parser for console output when no TRX file was produced. */
+export function parseTestConsoleOutput(output: string, project: string): TestCaseResult[] {
+  const tests: TestCaseResult[] = [];
+  // e.g. "  Passed MyTests.CalcTests.Add [3 ms]" / "  Failed MyTests.T(x: 1) [1 s]"
+  const lineRegex = /^\s*(Passed|Failed|Skipped)\s+(.+?)\s+\[([^\]]+)\]\s*$/gim;
+  let m: RegExpExecArray | null;
+  while ((m = lineRegex.exec(output)) !== null) {
+    const statusRaw = m[1].toLowerCase();
+    const fullName = m[2].trim();
+    // Split namespace/class from method, ignoring dots inside a parameter list
+    const parenIdx = fullName.indexOf('(');
+    const head = parenIdx === -1 ? fullName : fullName.slice(0, parenIdx);
+    const lastDot = head.lastIndexOf('.');
+    const methodName = lastDot === -1 ? fullName : fullName.slice(lastDot + 1);
+    const suiteName = lastDot === -1 ? 'Tests' : head.slice(0, lastDot);
+    const dur = m[3];
+    let durationMs: number | undefined;
+    const ms = /([\d.]+)\s*ms/.exec(dur);
+    const sec = /([\d.]+)\s*s\b/.exec(dur);
+    const min = /(\d+)\s*m\b/.exec(dur);
+    if (ms) durationMs = Number(ms[1]);
+    else if (sec || min) durationMs = Math.round(((min ? Number(min[1]) * 60 : 0) + (sec ? Number(sec[1]) : 0)) * 1000);
+    tests.push({
+      id: fullName,
+      name: methodName,
+      suite: suiteName,
+      project,
+      status: statusRaw === 'passed' ? 'passed' : statusRaw === 'failed' ? 'failed' : 'skipped',
+      durationMs,
+    });
+  }
+  return tests;
 }
 
 export async function installCsharpLs(onOutput: (line: string) => void): Promise<boolean> {
@@ -621,15 +785,8 @@ export async function installCsharpLs(onOutput: (line: string) => void): Promise
   const dotnetBin = await getDotnetBin();
   return new Promise((resolve) => {
     onOutput('Installing csharp-ls global tool via dotnet...');
-    const proc = spawn(dotnetBin, ['tool', 'install', '--global', 'csharp-ls'], { env });
-    const handle = (buf: Buffer) => {
-      for (const l of buf.toString('utf-8').split(/\r?\n/)) {
-        if (l) onOutput(l);
-      }
-    };
-    proc.stdout.on('data', handle);
-    proc.stderr.on('data', handle);
-    proc.on('close', (code) => resolve(code === 0));
-    proc.on('error', () => resolve(false));
+    spawnDotnetLines(dotnetBin, ['tool', 'install', '--global', 'csharp-ls'], { env }, onOutput, (code, _o, err) =>
+      resolve(!err && code === 0),
+    );
   });
 }

@@ -6,11 +6,18 @@ export const vsApi = {
     minimize: () => ipcRenderer.invoke('window:minimize'),
     maximize: () => ipcRenderer.invoke('window:maximize'),
     close: () => ipcRenderer.invoke('window:close'),
+    /** Closes the main window without asking the renderer again (after the save prompt). */
+    forceClose: () => ipcRenderer.invoke('window:forceClose'),
+    closeAck: () => ipcRenderer.invoke('window:closeAck'),
+    cancelClose: () => ipcRenderer.invoke('window:cancelClose'),
   },
   dialog: {
     openSolution: (): Promise<string | null> => ipcRenderer.invoke('dialog:openSolution'),
     openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:openFolder'),
     openProjectFile: (): Promise<string | null> => ipcRenderer.invoke('dialog:openProjectFile'),
+    /** VS "Save changes to the following items?" prompt: Yes / No / Cancel */
+    confirmSave: (titles: string[]): Promise<'save' | 'discard' | 'cancel'> =>
+      ipcRenderer.invoke('dialog:confirmSave', titles),
   },
   env: {
     detect: () => ipcRenderer.invoke('env:detect'),

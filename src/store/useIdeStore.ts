@@ -105,7 +105,13 @@ const PROJECT_TAB_COLORS = [
 
 function getProjectColor(solution: SolutionInfo | null, filePath: string): { projectId?: string; projectName?: string; projectColor?: string } {
   if (!solution) return {};
-  const idx = solution.projects.findIndex((p) => filePath.startsWith(p.dir));
+  // Longest matching project dir wins ("/src/App" must not claim "/src/App.Tests/…")
+  let idx = -1;
+  solution.projects.forEach((p, i) => {
+    if (filePath === p.dir || filePath.startsWith(p.dir.endsWith('/') ? p.dir : p.dir + '/')) {
+      if (idx === -1 || p.dir.length > solution.projects[idx].dir.length) idx = i;
+    }
+  });
   if (idx === -1) return {};
   const p = solution.projects[idx];
   return {
@@ -259,6 +265,12 @@ export interface IdeState {
   saveTab: (tabId: string) => Promise<void>;
   saveAllTabs: () => Promise<void>;
   closeTab: (tabId: string) => void;
+  /** VS "Save changes to the following items?" – resolves false when the user pressed Cancel. */
+  confirmCloseTabs: (tabIds: string[]) => Promise<boolean>;
+  /** Keeps open tabs / breakpoints in sync after a rename or move in Solution Explorer. */
+  renamePathInTabs: (oldPath: string, newPath: string) => void;
+  /** Closes (without prompting) every tab of a deleted file or folder. */
+  closeTabsUnderPath: (deletedPath: string) => void;
   closeAllTabs: (groupId?: number) => void;
   closeOtherTabs: (tabId: string) => void;
   closeTabsToRight: (tabId: string) => void;
@@ -325,19 +337,36 @@ const savedTabLayout = (localStorage.getItem('vs.tabLayout') as TabLayoutPositio
 const savedColorize = localStorage.getItem('vs.colorizeTabs') !== 'false';
 const savedConsoleMode = (localStorage.getItem('vs.consoleMode') as ConsoleLaunchMode) || 'externalWindow';
 const savedAutoCloseConsole = localStorage.getItem('vs.autoCloseConsole') === 'true';
+const savedFontSize = Number(localStorage.getItem('vs.fontSize')) || 13;
+const savedWordWrap = localStorage.getItem('vs.wordWrap') === 'true';
+const savedMinimap = localStorage.getItem('vs.minimap') !== 'false';
+const savedEditorZoom = Number(localStorage.getItem('vs.editorZoom')) || 100;
 applyThemeToDom(savedTheme);
+
+// Guards against F5 key-repeat / menu + shortcut double launches
+let debugLaunchInProgress = false;
+// Set while re-running a close action after the user answered the save prompt with "No"
+let closeGuardBypass = false;
+function withCloseBypass(fn: () => void): void {
+  closeGuardBypass = true;
+  try {
+    fn();
+  } finally {
+    closeGuardBypass = false;
+  }
+}
 
 export const useIdeStore = create<IdeState>((set, get) => ({
   screen: 'start',
   theme: savedTheme,
   keymap: savedKeymap,
-  fontSize: 13,
-  wordWrap: false,
-  minimap: true,
+  fontSize: savedFontSize,
+  wordWrap: savedWordWrap,
+  minimap: savedMinimap,
   showAllFiles: false,
   tabLayout: savedTabLayout,
   colorizeTabsByProject: savedColorize,
-  editorZoom: 100,
+  editorZoom: savedEditorZoom,
   consoleLaunchMode: savedConsoleMode,
   autoCloseConsole: savedAutoCloseConsole,
   pendingTerminalCommand: null,
@@ -446,9 +475,18 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     set({ keymap });
   },
 
-  setFontSize: (fontSize) => set({ fontSize }),
-  setWordWrap: (wordWrap) => set({ wordWrap }),
-  setMinimap: (minimap) => set({ minimap }),
+  setFontSize: (fontSize) => {
+    localStorage.setItem('vs.fontSize', String(fontSize));
+    set({ fontSize });
+  },
+  setWordWrap: (wordWrap) => {
+    localStorage.setItem('vs.wordWrap', String(wordWrap));
+    set({ wordWrap });
+  },
+  setMinimap: (minimap) => {
+    localStorage.setItem('vs.minimap', String(minimap));
+    set({ minimap });
+  },
   setShowAllFiles: async (showAllFiles) => {
     set({ showAllFiles });
     await get().refreshSolutionTrees();
@@ -461,7 +499,11 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     localStorage.setItem('vs.colorizeTabs', String(colorizeTabsByProject));
     set({ colorizeTabsByProject });
   },
-  setEditorZoom: (editorZoom) => set({ editorZoom: Math.max(50, Math.min(200, editorZoom)) }),
+  setEditorZoom: (editorZoom) => {
+    const z = Math.max(50, Math.min(200, editorZoom));
+    localStorage.setItem('vs.editorZoom', String(z));
+    set({ editorZoom: z });
+  },
   setConsoleLaunchMode: (consoleLaunchMode) => {
     localStorage.setItem('vs.consoleMode', consoleLaunchMode);
     set({ consoleLaunchMode });
@@ -474,7 +516,12 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   setScreen: (screen) => set({ screen }),
 
   openSolution: async (targetPath) => {
+    // Unsaved documents of the current solution: ask first (VS behaviour)
+    if (!(await get().confirmCloseTabs(get().openTabs.map((t) => t.id)))) return;
     const sln = (await window.vsApi.solution.open(targetPath)) as SolutionInfo;
+    if (get().solution && get().solution?.path !== sln.path) {
+      void window.vsApi?.debug.stop();
+    }
     set({
       solution: sln,
       screen: 'ide',
@@ -493,6 +540,16 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       lspHasPublished: {},
       lspStaleByFile: {},
       taskListItems: [],
+      ...(get().solution?.path !== sln.path
+        ? {
+            debugState: 'stopped' as const,
+            debugFrames: [],
+            debugLocals: [],
+            debugPausedLocation: null,
+            breakpoints: [],
+            searchResults: [],
+          }
+        : {}),
       statusText: `Loaded solution '${sln.name}' (${sln.projects.length} project${sln.projects.length === 1 ? '' : 's'})`,
       selectedPropertyTarget: {
         kind: 'solution',
@@ -532,6 +589,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   closeSolution: () => {
+    if (!closeGuardBypass) {
+      const guardIds = get().openTabs.map((t) => t.id);
+      if (get().openTabs.some((t) => guardIds.includes(t.id) && t.kind === 'code' && t.isDirty)) {
+        void get().confirmCloseTabs(guardIds).then((ok) => {
+          if (ok) withCloseBypass(() => get().closeSolution());
+        });
+        return;
+      }
+    }
     void window.vsApi?.lsp.stop();
     void window.vsApi?.debug.stop();
     set({
@@ -554,6 +620,13 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       gitStatus: null,
       tests: [],
       taskListItems: [],
+      debugState: 'stopped',
+      debugFrames: [],
+      debugLocals: [],
+      debugPausedLocation: null,
+      isBuilding: false,
+      breakpoints: [],
+      searchResults: [],
       screen: 'start',
       statusText: 'Ready',
     });
@@ -667,6 +740,17 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     };
 
     set((s) => {
+      // Another openFile() for the same path finished first (click + double-click): just activate it
+      const already = s.openTabs.find((t) => t.id === id);
+      if (already) {
+        const g = already.groupId ?? 0;
+        return {
+          activeTabId: id,
+          activeGroupId: g,
+          activeTabByGroup: { ...s.activeTabByGroup, [g]: id },
+          openTabs: isPreview ? s.openTabs : s.openTabs.map((t) => (t.id === id ? { ...t, isPreview: false } : t)),
+        };
+      }
       // If opening as Preview Tab, replace any existing unmodified preview tab in the same group
       let nextTabs = isPreview
         ? s.openTabs.filter((t) => !(t.isPreview && !t.isDirty && (t.groupId ?? 0) === targetGroup))
@@ -858,10 +942,18 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   saveTab: async (tabId) => {
     const tab = get().openTabs.find((t) => t.id === tabId);
     if (!tab || tab.kind !== 'code') return;
-    await window.vsApi.fs.writeFile(tab.path, tab.content);
+    try {
+      await window.vsApi.fs.writeFile(tab.path, tab.content);
+    } catch (err) {
+      set({ statusText: `Save failed: ${tab.title} – ${(err as Error)?.message ?? String(err)}` });
+      return;
+    }
+    // Only the written snapshot is "saved" – edits typed during the write stay dirty
     set((s) => ({
       openTabs: s.openTabs.map((t) =>
-        t.id === tabId ? { ...t, savedContent: t.content, isDirty: false, isPreview: false } : t,
+        t.id === tabId
+          ? { ...t, savedContent: tab.content, isDirty: t.content !== tab.content, isPreview: false }
+          : t,
       ),
       statusText: `Item(s) Saved (${tab.title})`,
     }));
@@ -887,7 +979,89 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     }
   },
 
+  confirmCloseTabs: async (tabIds) => {
+    const dirty = get().openTabs.filter((t) => tabIds.includes(t.id) && t.kind === 'code' && t.isDirty);
+    if (dirty.length === 0) return true;
+    let choice: 'save' | 'discard' | 'cancel';
+    if (window.vsApi?.dialog?.confirmSave) {
+      choice = await window.vsApi.dialog.confirmSave(dirty.map((t) => t.path || t.title));
+    } else {
+      choice = window.confirm(`Save changes to the following items?\n\n${dirty.map((t) => t.title).join('\n')}`)
+        ? 'save'
+        : 'cancel';
+    }
+    if (choice === 'cancel') return false;
+    if (choice === 'save') {
+      for (const t of dirty) {
+        await get().saveTab(t.id);
+      }
+      // Saving failed (e.g. permission denied) -> keep the document open
+      if (get().openTabs.some((t) => tabIds.includes(t.id) && t.kind === 'code' && t.isDirty)) return false;
+    }
+    return true;
+  },
+
+  renamePathInTabs: (oldPath, newPath) => {
+    const remap = (p: string) =>
+      p === oldPath ? newPath : p.startsWith(oldPath + '/') ? newPath + p.slice(oldPath.length) : null;
+    set((s) => {
+      const idMap = new Map<string, string>();
+      const openTabs = s.openTabs.map((t) => {
+        if (t.kind !== 'code') return t;
+        const np = remap(t.path);
+        if (!np) return t;
+        const id = `code:${np}`;
+        idMap.set(t.id, id);
+        return {
+          ...t,
+          id,
+          path: np,
+          title: np.split('/').pop() || np,
+          language: detectLanguage(np),
+          ...getProjectColor(s.solution, np),
+        };
+      });
+      const mapId = (id: string | null) => (id && idMap.has(id) ? idMap.get(id)! : id);
+      const breakpoints = s.breakpoints.map((b) => {
+        const np = remap(b.file);
+        return np ? { ...b, file: np, id: `${np}:${b.line}` } : b;
+      });
+      return {
+        openTabs,
+        breakpoints,
+        activeTabId: mapId(s.activeTabId),
+        activeTabByGroup: { 0: mapId(s.activeTabByGroup[0] ?? null), 1: mapId(s.activeTabByGroup[1] ?? null) },
+      };
+    });
+    void window.vsApi?.debug.syncBreakpoints(get().breakpoints);
+  },
+
+  closeTabsUnderPath: (deletedPath) => {
+    const ids = get()
+      .openTabs.filter((t) => t.kind === 'code' && (t.path === deletedPath || t.path.startsWith(deletedPath + '/')))
+      .map((t) => t.id);
+    withCloseBypass(() => {
+      for (const id of ids) get().closeTab(id);
+    });
+    const breakpoints = get().breakpoints.filter(
+      (b) => !(b.file === deletedPath || b.file.startsWith(deletedPath + '/')),
+    );
+    if (breakpoints.length !== get().breakpoints.length) {
+      set({ breakpoints });
+      void window.vsApi?.debug.syncBreakpoints(breakpoints);
+    }
+  },
+
   closeTab: (tabId) => {
+    if (!closeGuardBypass) {
+      const guardIds = [tabId];
+      if (get().openTabs.some((t) => guardIds.includes(t.id) && t.kind === 'code' && t.isDirty)) {
+        void get().confirmCloseTabs(guardIds).then((ok) => {
+          if (ok) withCloseBypass(() => get().closeTab(tabId));
+        });
+        return;
+      }
+    }
     set((s) => {
       const target = s.openTabs.find((t) => t.id === tabId);
       const grp = target?.groupId ?? 0;
@@ -925,6 +1099,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   closeAllTabs: (groupId) => {
+    if (!closeGuardBypass) {
+      const guardIds = get().openTabs.filter((t) => groupId === undefined || (t.groupId ?? 0) === groupId).map((t) => t.id);
+      if (get().openTabs.some((t) => guardIds.includes(t.id) && t.kind === 'code' && t.isDirty)) {
+        void get().confirmCloseTabs(guardIds).then((ok) => {
+          if (ok) withCloseBypass(() => get().closeAllTabs(groupId));
+        });
+        return;
+      }
+    }
     set((s) => {
       const next =
         groupId === undefined
@@ -943,6 +1126,21 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   closeOtherTabs: (tabId) => {
+    if (!closeGuardBypass) {
+      const guardIds = (() => {
+        const keep = get().openTabs.find((t) => t.id === tabId);
+        const grp = keep?.groupId ?? 0;
+        return get()
+          .openTabs.filter((t) => (t.groupId ?? 0) === grp && t.id !== tabId && !t.isPinned)
+          .map((t) => t.id);
+      })();
+      if (get().openTabs.some((t) => guardIds.includes(t.id) && t.kind === 'code' && t.isDirty)) {
+        void get().confirmCloseTabs(guardIds).then((ok) => {
+          if (ok) withCloseBypass(() => get().closeOtherTabs(tabId));
+        });
+        return;
+      }
+    }
     set((s) => {
       const keep = s.openTabs.find((t) => t.id === tabId);
       if (!keep) return {};
@@ -957,6 +1155,21 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   closeTabsToRight: (tabId) => {
+    if (!closeGuardBypass) {
+      const guardIds = (() => {
+        const target = get().openTabs.find((t) => t.id === tabId);
+        const grp = target?.groupId ?? 0;
+        const groupTabs = get().openTabs.filter((t) => (t.groupId ?? 0) === grp);
+        const idx = groupTabs.findIndex((t) => t.id === tabId);
+        return idx === -1 ? [] : groupTabs.slice(idx + 1).filter((t) => !t.isPinned).map((t) => t.id);
+      })();
+      if (get().openTabs.some((t) => guardIds.includes(t.id) && t.kind === 'code' && t.isDirty)) {
+        void get().confirmCloseTabs(guardIds).then((ok) => {
+          if (ok) withCloseBypass(() => get().closeTabsToRight(tabId));
+        });
+        return;
+      }
+    }
     set((s) => {
       const target = s.openTabs.find((t) => t.id === tabId);
       if (!target) return {};
@@ -975,6 +1188,21 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   closeTabsToLeft: (tabId) => {
+    if (!closeGuardBypass) {
+      const guardIds = (() => {
+        const target = get().openTabs.find((t) => t.id === tabId);
+        const grp = target?.groupId ?? 0;
+        const groupTabs = get().openTabs.filter((t) => (t.groupId ?? 0) === grp);
+        const idx = groupTabs.findIndex((t) => t.id === tabId);
+        return idx === -1 ? [] : groupTabs.slice(0, idx).filter((t) => !t.isPinned).map((t) => t.id);
+      })();
+      if (get().openTabs.some((t) => guardIds.includes(t.id) && t.kind === 'code' && t.isDirty)) {
+        void get().confirmCloseTabs(guardIds).then((ok) => {
+          if (ok) withCloseBypass(() => get().closeTabsToLeft(tabId));
+        });
+        return;
+      }
+    }
     set((s) => {
       const target = s.openTabs.find((t) => t.id === tabId);
       if (!target) return {};
@@ -1153,7 +1381,11 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   buildSolution: async (mode, projectPath) => {
     const sln = get().solution;
     if (!sln) return false;
-    await get().saveAllTabs();
+    // Like VS: a second build request while one is running is ignored
+    if (get().isBuilding) return false;
+    set({ isBuilding: true });
+    try {
+      await get().saveAllTabs();
 
     const target = projectPath || (sln.format === 'sln' || sln.format === 'slnx' ? sln.path : sln.projects[0]?.path || sln.dir);
     set({
@@ -1190,6 +1422,14 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       bottomPanel: res.diagnostics?.length ? 'errorList' : 'output',
     });
     return res.success;
+    } catch (err) {
+      get().appendOutput('Build', `Build failed: ${(err as Error)?.message ?? String(err)}`);
+      set({ statusText: 'Build failed' });
+      return false;
+    } finally {
+      // Never leave the toolbar disabled when dotnet is missing or the IPC call throws
+      if (get().isBuilding) set({ isBuilding: false });
+    }
   },
 
   startDebugging: async (withDebugger) => {
@@ -1197,7 +1437,16 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     if (!sln) return;
     const startup = sln.projects.find((p) => p.id === sln.startupProjectId) || sln.projects[0];
     if (!startup) return;
-
+    // Ignore F5 key repeat / double clicks while a launch or build is in progress
+    if (debugLaunchInProgress || get().isBuilding) return;
+    // VS: F5 while paused = Continue, F5 while already debugging does nothing
+    if (withDebugger && get().debugState === 'paused') {
+      await get().continueDebugging();
+      return;
+    }
+    if (withDebugger && get().debugState === 'running') return;
+    debugLaunchInProgress = true;
+    try {
     const ok = await get().buildSolution('build', startup.path);
     if (!ok) return;
 
@@ -1256,6 +1505,12 @@ export const useIdeStore = create<IdeState>((set, get) => ({
         consoleMode,
       });
     }
+    } catch (err) {
+      get().appendOutput('Debug', `Unable to start program: ${(err as Error)?.message ?? String(err)}`);
+      set({ debugState: 'stopped', statusText: 'Ready' });
+    } finally {
+      debugLaunchInProgress = false;
+    }
   },
 
   stopDebugging: async () => {
@@ -1274,12 +1529,18 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     await window.vsApi.debug.continue();
   },
   stepOver: async () => {
+    if (get().debugState !== 'paused') return;
+    set({ debugPausedLocation: null, debugState: 'running' });
     await window.vsApi.debug.stepOver();
   },
   stepInto: async () => {
+    if (get().debugState !== 'paused') return;
+    set({ debugPausedLocation: null, debugState: 'running' });
     await window.vsApi.debug.stepInto();
   },
   stepOut: async () => {
+    if (get().debugState !== 'paused') return;
+    set({ debugPausedLocation: null, debugState: 'running' });
     await window.vsApi.debug.stepOut();
   },
 

@@ -251,15 +251,17 @@ export const TitleBarAndMenu: React.FC = () => {
     ],
     Debug: [
       {
-        label: 'Start Debugging',
+        // VS shows "Continue" while paused and greys the item out while running
+        label: store.debugState === 'paused' ? 'Continue' : 'Start Debugging',
         shortcut: shortcuts.startDebug,
-        disabled: !hasSolution,
-        action: () => void store.startDebugging(true),
+        disabled: !hasSolution || store.isBuilding || store.debugState === 'running',
+        action: () =>
+          void (store.debugState === 'paused' ? store.continueDebugging() : store.startDebugging(true)),
       },
       {
         label: 'Start Without Debugging',
         shortcut: shortcuts.startWithoutDebug,
-        disabled: !hasSolution,
+        disabled: !hasSolution || store.isBuilding,
         action: () => void store.startDebugging(false),
       },
       {

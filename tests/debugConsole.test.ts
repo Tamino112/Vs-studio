@@ -171,6 +171,65 @@ describe('Debug Console & Terminal Launch', () => {
     expect(exitInfo?.code).toBe(7);
   });
 
+  it('restart (F5 while running) does not let the old process exit end the new session', async () => {
+    const projDir = path.join(tmpDir, 'RestartApp');
+    const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');
+    await fs.mkdir(outDir, { recursive: true });
+    const csprojPath = path.join(projDir, 'RestartApp.csproj');
+    const dllPath = path.join(outDir, 'RestartApp.dll');
+    await fs.writeFile(csprojPath, '<Project />', 'utf-8');
+    await fs.writeFile(
+      dllPath,
+      `process.stdout.write('RUN ');\nsetTimeout(() => process.exit(5), 600);\n`,
+      'utf-8',
+    );
+
+    const mgr = new DotnetDebugManager();
+    const starts: ConsoleSessionMeta[] = [];
+    const exits: ConsoleExitInfo[] = [];
+    let secondStarted = false;
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for restart test')), 8000);
+      mgr.setCallbacks({
+        onOutput: () => {},
+        onStateChange: () => {},
+        onStopped: () => {},
+        onConsoleStart: (meta) => {
+          starts.push(meta);
+        },
+        onConsoleData: () => {
+          if (!secondStarted) {
+            secondStarted = true;
+            void mgr.startWithoutDebugging(csprojPath, 'Debug', {
+              projectName: 'RestartApp',
+              targetFramework: 'net10.0',
+            });
+          }
+        },
+        onConsoleExit: (info) => {
+          exits.push(info);
+        },
+        onExited: (code) => {
+          if (code === 5) {
+            clearTimeout(timer);
+            resolve();
+          }
+        },
+      });
+      void mgr.startWithoutDebugging(csprojPath, 'Debug', {
+        projectName: 'RestartApp',
+        targetFramework: 'net10.0',
+      });
+    });
+
+    expect(starts).toHaveLength(2);
+    // First session is reported as stopped (-1, like VS), second exits normally with its own pid
+    expect(exits).toHaveLength(2);
+    expect(exits[0]).toMatchObject({ code: -1, pid: starts[0].pid });
+    expect(exits[1]).toMatchObject({ code: 5, pid: starts[1].pid });
+  });
+
   it('handles DAP reverse runInTerminal request when debugging a console app', async () => {
     const projDir = path.join(tmpDir, 'DebugApp');
     const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');

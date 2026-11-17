@@ -93,7 +93,9 @@ export const SolutionExplorer: React.FC = () => {
     setRenamingPath(null);
     if (!trimmed || trimmed === node.name) return;
     const parentDir = node.path.slice(0, node.path.lastIndexOf('/'));
-    await window.vsApi.fs.rename(node.path, `${parentDir}/${trimmed}`);
+    const newPath = `${parentDir}/${trimmed}`;
+    await window.vsApi.fs.rename(node.path, newPath);
+    useIdeStore.getState().renamePathInTabs(node.path, newPath);
     await refreshSolutionTrees();
   };
 
@@ -377,8 +379,9 @@ export const SolutionExplorer: React.FC = () => {
           setRenamingPath(selectedNode.path);
         } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNode) {
           e.preventDefault();
-          if (window.confirm(`Delete '${selectedNode.name}'?`)) {
+          if (window.confirm(`'${selectedNode.name}' will be deleted permanently.`)) {
             await window.vsApi.fs.delete(selectedNode.path);
+            useIdeStore.getState().closeTabsUnderPath(selectedNode.path);
             setSelectedNode(null);
             await refreshSolutionTrees();
           }
@@ -623,8 +626,11 @@ export const SolutionExplorer: React.FC = () => {
                 label="Delete"
                 onClick={async () => {
                   const target = ctxMenu.node!.path;
+                  const targetName = ctxMenu.node!.name;
                   setCtxMenu(null);
+                  if (!window.confirm(`'${targetName}' will be deleted permanently.`)) return;
                   await window.vsApi.fs.delete(target);
+                  useIdeStore.getState().closeTabsUnderPath(target);
                   await refreshSolutionTrees();
                 }}
               />

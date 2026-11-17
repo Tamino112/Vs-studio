@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { applyTerminalChunk, terminalSegments } from '../utils/terminalRender';
 import { selectAllEffectiveDiagnostics, useIdeStore } from '../store/useIdeStore';
 import { OutputChannelName } from '../types/ide';
 
@@ -114,7 +115,7 @@ export const ErrorListPanel: React.FC = () => {
                   <tr
                     key={d.id}
                     onClick={() => setSelectedDiagId(d.id)}
-                    onDoubleClick={() => void openFile(d.file, d.line, d.column)}
+                    onDoubleClick={() => { if (d.file && !d.file.endsWith(".csproj") && !d.file.endsWith(".sln")) void openFile(d.file, d.line, d.column); }}
                     style={{
                       borderBottom: '1px solid var(--vs-border-subtle)',
                       cursor: 'pointer',
@@ -333,9 +334,11 @@ export const TerminalPanel: React.FC = () => {
     const unsubData = window.vsApi.on('terminal:data', (payload) => {
       const p = payload as { id: string; data: string };
       if (p.id === termId) {
-        // eslint-disable-next-line no-control-regex
-        const clean = p.data.replace(/\r\n/g, '\n').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-        setTermOutput((prev) => (prev + clean).slice(-25000));
+        // Same terminal emulation as the Debug Console (CR/LF split across chunks, \b, escapes)
+        setTermOutput((prev) => {
+          const next = applyTerminalChunk(prev, p.data);
+          return next.length > 25000 ? next.slice(-25000) : next;
+        });
       }
     });
     return () => {
@@ -375,7 +378,11 @@ export const TerminalPanel: React.FC = () => {
           userSelect: 'text',
         }}
       >
-        {termOutput}
+        {terminalSegments(termOutput).map((seg, idx) => (
+          <span key={idx} style={seg.color || seg.background ? { color: seg.color, background: seg.background } : undefined}>
+            {seg.text}
+          </span>
+        ))}
       </div>
       <div
         style={{

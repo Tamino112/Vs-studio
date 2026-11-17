@@ -388,23 +388,48 @@ export function parseMsbuildDiagnostics(output: string, defaultDir: string): Dia
   const lines = output.split(/\r?\n/);
   // Standard MSBuild line: /path/Program.cs(12,5): error CS0103: The name 'foo' does not exist in the current context [/path/App.csproj]
   const regex =
-    /^\s*(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+([A-Z]+\d+):\s+(.+?)(?:\s+\[(.+?)\])?\s*$/i;
+    /^\s*(.+?)\((\d+)(?:,(\d+))?(?:,(\d+),(\d+))?\):\s+(error|warning)\s+([A-Z]+\d+):\s+(.+?)(?:\s+\[(.+?)\])?\s*$/i;
+  // Errors without a location: "App.csproj : error NU1101: …", "CSC : error CS5001: …", "MSBUILD : error MSB1009: …"
+  const noLocRegex =
+    /^\s*(.+?)\s*:\s+(error|warning)\s+([A-Z]+\d+):\s+(.+?)(?:\s+\[(.+?)\])?\s*$/i;
 
   for (const line of lines) {
+    let rawFile: string;
+    let lineNum = 1;
+    let colNum = 1;
+    let severity: 'error' | 'warning';
+    let code: string;
+    let description: string;
+    let projectPath: string;
     const m = regex.exec(line);
-    if (!m) continue;
-    const rawFile = m[1].trim();
-    const lineNum = Number(m[2]) || 1;
-    const colNum = Number(m[3]) || 1;
-    const severity = m[4].toLowerCase() === 'warning' ? 'warning' : 'error';
-    const code = m[5];
-    const description = m[6].trim();
-    const projectPath = m[7]?.trim() || '';
-    const projectName = projectPath ? path.basename(projectPath, '.csproj') : '';
+    if (m) {
+      rawFile = m[1].trim();
+      lineNum = Number(m[2]) || 1;
+      colNum = Number(m[3]) || 1;
+      severity = m[6].toLowerCase() === 'warning' ? 'warning' : 'error';
+      code = m[7];
+      description = m[8].trim();
+      projectPath = m[9]?.trim() || '';
+    } else {
+      const n = noLocRegex.exec(line);
+      if (!n) continue;
+      rawFile = n[1].trim();
+      severity = n[2].toLowerCase() === 'warning' ? 'warning' : 'error';
+      code = n[3];
+      description = n[4].trim();
+      projectPath = n[5]?.trim() || '';
+      // Tool names like CSC / MSBUILD are not files
+      if (!/[\\/.]/.test(rawFile)) rawFile = projectPath || '';
+    }
+    // Multi-targeting: "[/x/App.csproj::TargetFramework=net10.0]"
+    projectPath = projectPath.split('::')[0];
+    const projectName = projectPath ? path.basename(projectPath, path.extname(projectPath)) : '';
 
-    const absFile = path.isAbsolute(rawFile)
-      ? rawFile
-      : path.resolve(projectPath ? path.dirname(projectPath) : defaultDir, rawFile);
+    const absFile = !rawFile
+      ? ''
+      : path.isAbsolute(rawFile)
+        ? rawFile
+        : path.resolve(projectPath ? path.dirname(projectPath) : defaultDir, rawFile);
 
     const key = `${severity}|${code}|${absFile}|${lineNum}|${colNum}|${description}`;
     if (seen.has(key)) continue;

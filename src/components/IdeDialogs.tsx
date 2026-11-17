@@ -19,8 +19,16 @@ export const AddNewItemDialog: React.FC = () => {
 
   if (!addNewItemTargetDir) return null;
 
-  const ownerProj = solution?.projects.find((p) => addNewItemTargetDir.startsWith(p.dir));
-  const ns = ownerProj?.name.replace(/[^a-zA-Z0-9_]/g, '_') || 'MyApp';
+  // Longest matching project dir ("/src/App" must not own "/src/App.Tests")
+  const ownerProj = solution?.projects
+    .filter((p) => addNewItemTargetDir === p.dir || addNewItemTargetDir.startsWith(p.dir + '/'))
+    .sort((a, b) => b.dir.length - a.dir.length)[0];
+  // Like VS: RootNamespace + sub folders (Project/Models/Dto -> Project.Models.Dto)
+  const nsPart = (v: string) => v.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^(\d)/, '_$1');
+  const subFolders = ownerProj
+    ? addNewItemTargetDir.slice(ownerProj.dir.length).split('/').filter(Boolean).map(nsPart)
+    : [];
+  const ns = ownerProj ? [nsPart(ownerProj.name), ...subFolders].join('.') : 'MyApp';
 
   const handleCreate = async () => {
     const trimmed = name.trim();

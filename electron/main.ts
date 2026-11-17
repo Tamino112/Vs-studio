@@ -12,6 +12,7 @@ import {
   runDotnetBuild,
   runDotnetClean,
   runDotnetTest,
+  killAllDotnetProcesses,
 } from './services/dotnetService';
 import {
   addRecentSolution,
@@ -53,6 +54,10 @@ import { DotnetDebugManager } from './services/debugService';
 import { TerminalManager } from './services/terminalService';
 
 let mainWindow: BrowserWindow | null = null;
+/** Set once the renderer confirmed (or there were no unsaved changes) – lets the window close. */
+let allowMainWindowClose = false;
+let quitRequested = false;
+let closeAcked = false;
 let debugConsoleWindow: BrowserWindow | null = null;
 let consoleSessionCounter = 0;
 let currentConsoleSnapshot: {
@@ -161,8 +166,26 @@ function createWindow(): void {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
+  allowMainWindowClose = false;
+  // Like VS: ask "Save changes to the following items?" before closing with unsaved documents
+  mainWindow.on('close', (e) => {
+    if (allowMainWindowClose || !mainWindow || mainWindow.webContents.isCrashed()) return;
+    e.preventDefault();
+    sendToRenderer('app:requestClose', null);
+    // Safety net: if the renderer does not acknowledge (hung / crashed UI), close anyway
+    closeAcked = false;
+    const win = mainWindow;
+    setTimeout(() => {
+      if (!closeAcked && !allowMainWindowClose && win && !win.isDestroyed()) {
+        allowMainWindowClose = true;
+        win.close();
+      }
+    }, 2000);
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
+    if (quitRequested) app.quit();
     if (debugConsoleWindow && !debugConsoleWindow.isDestroyed()) {
       debugConsoleWindow.close();
     }
@@ -279,6 +302,17 @@ function registerIpc(): void {
     else mainWindow.maximize();
   });
   ipcMain.handle('window:close', () => mainWindow?.close());
+  ipcMain.handle('window:closeAck', () => {
+    closeAcked = true;
+  });
+  ipcMain.handle('window:cancelClose', () => {
+    // User pressed Cancel in the save prompt: also abort a pending Cmd+Q
+    quitRequested = false;
+  });
+  ipcMain.handle('window:forceClose', () => {
+    allowMainWindowClose = true;
+    mainWindow?.close();
+  });
 
   // Dialogs
   ipcMain.handle('dialog:openSolution', async () => {
@@ -291,6 +325,21 @@ function registerIpc(): void {
       ],
     });
     return res.canceled ? null : res.filePaths[0];
+  });
+
+  ipcMain.handle('dialog:confirmSave', async (_e, titles: string[]) => {
+    const opts: Electron.MessageBoxOptions = {
+      type: 'warning',
+      title: 'Microsoft Visual Studio',
+      message: 'Save changes to the following items?',
+      detail: (titles || []).join('\n'),
+      buttons: ['Yes', 'No', 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    };
+    const res = mainWindow ? await dialog.showMessageBox(mainWindow, opts) : await dialog.showMessageBox(opts);
+    return res.response === 0 ? 'save' : res.response === 1 ? 'discard' : 'cancel';
   });
 
   ipcMain.handle('dialog:openFolder', async () => {
@@ -573,9 +622,24 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('window-all-closed', () => {
+function disposeChildProcesses(): void {
   lspClient.stop();
   terminalManager.killAll();
-  void debugManager.stop();
+  debugManager.disposeSync();
+  killAllDotnetProcesses();
+}
+
+app.on('window-all-closed', () => {
+  disposeChildProcesses();
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  quitRequested = true;
+});
+
+// Cmd+Q / Dock -> Quit do not emit 'window-all-closed' – make sure nothing keeps running.
+// ('will-quit' fires only after the save prompt allowed every window to close.)
+app.on('will-quit', () => {
+  disposeChildProcesses();
 });

@@ -541,7 +541,8 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   const activeTabRef = useRef<OpenTab | null>(activeTab);
   activeTabRef.current = activeTab;
   const lastInsertedSnippetIdRef = useRef<number>(0);
-  const lastEditorCommandIdRef = useRef<number>(0);
+  // Commands dispatched before this editor existed must not replay on mount
+  const lastEditorCommandIdRef = useRef<number>(editorCommand?.id ?? 0);
 
   const [ctxMenu, setCtxMenu] = useState<TabContextMenuState | null>(null);
   const [activeFilesMenuOpen, setActiveFilesMenuOpen] = useState(false);
@@ -631,20 +632,33 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       }
     });
 
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      const curTab = activeTabRef.current;
-      if (curTab) void saveTab(curTab.id);
+    // NOTE: editor.addAction (not addCommand) – standalone addCommand keybindings are global,
+    // so with two tab groups the last created editor would receive Save / F9 / Format.
+    editor.addAction({
+      id: 'vs.file.save',
+      label: 'Save',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      run: () => {
+        const curTab = activeTabRef.current;
+        if (curTab) void saveTab(curTab.id);
+      },
     });
 
-    editor.addCommand(monaco.KeyCode.F9, () => {
-      const curTab = activeTabRef.current;
-      const pos = editor.getPosition();
-      if (curTab && curTab.kind === 'code' && pos) {
-        toggleBreakpoint(curTab.path, pos.lineNumber);
-      }
+    editor.addAction({
+      id: 'vs.debug.toggleBreakpoint',
+      label: 'Toggle Breakpoint',
+      keybindings: [monaco.KeyCode.F9],
+      contextMenuGroupId: '9_breakpoints',
+      run: () => {
+        const curTab = activeTabRef.current;
+        const pos = editor.getPosition();
+        if (curTab && curTab.kind === 'code' && pos) {
+          toggleBreakpoint(curTab.path, pos.lineNumber);
+        }
+      },
     });
 
-    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF, () => {
+    const formatDocument = () => {
       const curTab = activeTabRef.current;
       if (!curTab || curTab.kind !== 'code') return;
       if (curTab.language === 'csharp' && window.vsApi) {
@@ -668,10 +682,28 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       } else {
         void editor.getAction('editor.action.formatDocument')?.run();
       }
+    };
+    editor.addAction({
+      id: 'vs.edit.formatDocument',
+      label: 'Format Document',
+      // Shift+Alt+F and the classic Visual Studio chord Ctrl+K, Ctrl+D
+      keybindings: [
+        monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF,
+        monaco.KeyMod.chord(
+          monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK,
+          monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyD,
+        ),
+      ],
+      run: formatDocument,
     });
 
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => {
-      void editor.getAction('editor.action.commentLine')?.run();
+    editor.addAction({
+      id: 'vs.edit.toggleLineComment',
+      label: 'Toggle Line Comment',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash],
+      run: () => {
+        void editor.getAction('editor.action.commentLine')?.run();
+      },
     });
 
     return () => {
@@ -700,6 +732,10 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     if (prevModelUriRef.current) {
       viewStatesRef.current.set(prevModelUriRef.current, editor.saveViewState());
     }
+
+    // Decoration ids belong to the current model – drop them before swapping models,
+    // otherwise breakpoint dots / the debug arrow stay behind as "ghosts" on the old model.
+    decorationsRef.current = editor.deltaDecorations(decorationsRef.current, []);
 
     if (!activeTab || activeTab.kind !== 'code') {
       editor.setModel(null);
@@ -747,10 +783,12 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   useEffect(() => {
     if (!editorCommand || editorCommand.id === lastEditorCommandIdRef.current) return;
     if (activeGroupId !== groupId) return;
+    // Consume the command even if no code tab is active – otherwise it would fire later
+    // on an unrelated file as soon as a code tab gets activated.
+    lastEditorCommandIdRef.current = editorCommand.id;
     const editor = editorRef.current;
     if (!editor || activeTab?.kind !== 'code') return;
 
-    lastEditorCommandIdRef.current = editorCommand.id;
     const cmd = editorCommand.command;
 
     if (cmd === 'undo') {

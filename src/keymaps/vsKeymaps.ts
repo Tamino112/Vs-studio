@@ -40,7 +40,7 @@ export function getShortcutLabels(mode: KeymapMode): ShortcutLabels {
       toggleBreakpoint: 'F9',
       find: '⌘F',
       findInFiles: '⇧⌘F',
-      quickLaunch: '⌘Q',
+      quickLaunch: '⌃Q', // ⌘Q stays macOS Quit
       formatDoc: '⇧⌥F',
       terminal: '⌃`',
       options: '⌘,',

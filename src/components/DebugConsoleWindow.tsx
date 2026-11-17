@@ -1,55 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ConsoleSessionInfo } from '../types/ide';
+import {
+  applyTerminalChunk,
+  containsCursorQuery,
+  formatExitCode,
+  terminalCursorPosition,
+  terminalSegments,
+} from '../utils/terminalRender';
 
 interface ConsoleSnapshotPayload {
   session: ConsoleSessionInfo | null;
   output: string;
-}
-
-function applyTerminalChunk(prev: string, rawChunk: string): string {
-  // Normalize CRLF and handle common terminal control sequences (\x1b[2J, \x1b[K, \b, \r)
-  let text = rawChunk.replace(/\r\n/g, '\n');
-
-  if (text.includes('\x1b[2J') || text.includes('\x1b[3J')) {
-    const parts = text.split(/\x1b\[[23]J/);
-    prev = '';
-    text = parts[parts.length - 1] ?? '';
-  }
-
-  // Strip OSC & non-cursor-erase CSI sequences
-  // eslint-disable-next-line no-control-regex
-  text = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-  // eslint-disable-next-line no-control-regex
-  text = text.replace(/\x1b\[(?![012]?K)[0-9;?]*[A-Za-z]/g, '');
-
-  let out = prev;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '\x1b' && text.slice(i, i + 4).match(/^\x1b\[[012]?K/)) {
-      const m = /^\x1b\[([012]?)K/.exec(text.slice(i, i + 4))!;
-      i += m[0].length - 1;
-      if (m[1] === '2') {
-        const lastNl = out.lastIndexOf('\n');
-        out = lastNl === -1 ? '' : out.slice(0, lastNl + 1);
-      }
-      continue;
-    }
-    if (ch === '\x08' || ch === '\x7f') {
-      if (out.length > 0 && out[out.length - 1] !== '\n') {
-        out = out.slice(0, -1);
-      }
-      continue;
-    }
-    if (ch === '\r') {
-      // Carriage return rewinds to start of current line (unless already before \n, handled above)
-      const lastNl = out.lastIndexOf('\n');
-      out = lastNl === -1 ? '' : out.slice(0, lastNl + 1);
-      continue;
-    }
-    out += ch;
-  }
-
-  return out.length > 120000 ? out.slice(-120000) : out;
 }
 
 export const DebugConsoleWindow: React.FC = () => {
@@ -66,6 +27,8 @@ export const DebugConsoleWindow: React.FC = () => {
   inputBufferRef.current = inputBuffer;
   const autoCloseRef = useRef<boolean>(autoClose);
   autoCloseRef.current = autoClose;
+  const outputRef = useRef<string>('');
+  const segments = useMemo(() => terminalSegments(output), [output]);
 
   useEffect(() => {
     document.title = 'Microsoft Visual Studio Debug Console';
@@ -74,12 +37,17 @@ export const DebugConsoleWindow: React.FC = () => {
 
     void (window.vsApi.console.getSnapshot() as Promise<ConsoleSnapshotPayload>).then((snap) => {
       if (snap?.session) setSession(snap.session);
-      if (snap?.output) setOutput(applyTerminalChunk('', snap.output));
+      if (snap?.output) {
+        const restored = applyTerminalChunk('', snap.output);
+        outputRef.current = restored;
+        setOutput(restored);
+      }
     });
 
     const unsubSession = window.vsApi.on('console:session', (payload) => {
       const s = payload as ConsoleSessionInfo;
       setSession(s);
+      outputRef.current = '';
       setOutput('');
       setInputBuffer('');
       bodyRef.current?.focus();
@@ -88,7 +56,17 @@ export const DebugConsoleWindow: React.FC = () => {
     const unsubData = window.vsApi.on('console:data', (chunk) => {
       const raw = String(chunk || '');
       if (raw) {
-        setOutput((prev) => applyTerminalChunk(prev, raw));
+        const next = applyTerminalChunk(outputRef.current, raw);
+        outputRef.current = next;
+        setOutput(next);
+        // Answer cursor position queries (ESC[6n), e.g. Console.CursorLeft / CursorTop
+        const queries = containsCursorQuery(raw);
+        if (queries > 0 && sessionRef.current?.isPty) {
+          const { row, col } = terminalCursorPosition(next);
+          for (let q = 0; q < queries; q++) {
+            void window.vsApi?.debug.sendInput(`\x1b[${row};${col}R`);
+          }
+        }
       }
     });
 
@@ -205,7 +183,8 @@ export const DebugConsoleWindow: React.FC = () => {
           if (lines.length > 1) {
             const first = lines.shift() || '';
             const toSend = inputBufferRef.current + first + '\n' + lines.join('\n');
-            setOutput((prev) => prev + toSend);
+            outputRef.current += toSend;
+            setOutput(outputRef.current);
             setInputBuffer('');
             void window.vsApi?.debug.sendInput(toSend);
           } else {
@@ -235,7 +214,8 @@ export const DebugConsoleWindow: React.FC = () => {
       if (e.key === 'Enter') {
         e.preventDefault();
         const line = inputBufferRef.current + '\n';
-        setOutput((prev) => prev + line);
+        outputRef.current += line;
+        setOutput(outputRef.current);
         setInputBuffer('');
         void window.vsApi?.debug.sendInput(line);
       } else if (e.key === 'Backspace') {
@@ -354,6 +334,7 @@ export const DebugConsoleWindow: React.FC = () => {
             className="vs-btn"
             onClick={(e) => {
               e.currentTarget.blur();
+              outputRef.current = '';
               setOutput('');
             }}
             title="Clear Console"
@@ -403,7 +384,15 @@ export const DebugConsoleWindow: React.FC = () => {
           </div>
         ) : (
           <>
-            <span>{output}</span>
+            {segments.map((seg, idx) =>
+              seg.color || seg.background ? (
+                <span key={idx} style={{ color: seg.color, background: seg.background }}>
+                  {seg.text}
+                </span>
+              ) : (
+                <span key={idx}>{seg.text}</span>
+              ),
+            )}
             {session?.running && (
               <>
                 <span style={{ color: '#FFFFFF' }}>{inputBuffer}</span>
@@ -414,7 +403,7 @@ export const DebugConsoleWindow: React.FC = () => {
               <div style={{ marginTop: 14, color: '#9D9DA8' }}>
                 <div>
                   {session.exePath}
-                  {session.pid ? ` (process ${session.pid})` : ''} exited with code {session.exitCode ?? 0}.
+                  {session.pid ? ` (process ${session.pid})` : ''} exited with code {formatExitCode(session.exitCode ?? 0)}.
                 </div>
                 <div>
                   To automatically close the console when debugging stops, enable Tools -&gt; Options -&gt; Debugging -&gt; Automatically close the console when debugging stops.

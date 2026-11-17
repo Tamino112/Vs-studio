@@ -28,9 +28,34 @@ export interface GitStatusInfo {
   }>;
 }
 
-async function runGit(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, { cwd, env: getAugmentedEnv() });
+async function runGit(cwd: string, args: string[], timeoutMs = 120000): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd,
+    // Never wait for an interactive credential prompt (would hang pull/push forever)
+    env: { ...getAugmentedEnv(), GIT_TERMINAL_PROMPT: '0' },
+    timeout: timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return stdout;
+}
+
+/** Porcelain paths are relative to the repository root – which may be above the solution folder. */
+async function repoRoot(dir: string): Promise<string> {
+  try {
+    const root = (await runGit(dir, ['rev-parse', '--show-toplevel'])).trim();
+    if (!root) return dir;
+    // git returns the realpath (/private/var/… on macOS); express it relative to the
+    // path the IDE uses so file paths match open tabs exactly.
+    try {
+      const realDir = fsSync.realpathSync(dir);
+      const rel = path.relative(realDir, root);
+      return path.resolve(dir, rel);
+    } catch {
+      return root;
+    }
+  } catch {
+    return dir;
+  }
 }
 
 export async function getGitStatus(repoDir: string): Promise<GitStatusInfo> {
@@ -71,13 +96,18 @@ export async function getGitStatus(repoDir: string): Promise<GitStatusInfo> {
 
   const changes: GitFileChange[] = [];
   try {
-    const statusOut = await runGit(repoDir, ['status', '--porcelain=v1']);
-    for (const line of statusOut.split(/\r?\n/)) {
-      if (!line) continue;
+    const root = await repoRoot(repoDir);
+    // -z: NUL separated, unquoted paths; renames/copies are followed by the original path
+    const statusOut = await runGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+    const tokens = statusOut.split('\0');
+    for (let i = 0; i < tokens.length; i++) {
+      const line = tokens[i];
+      if (!line || line.length < 4) continue;
       const x = line[0];
       const y = line[1];
-      const rel = line.slice(3).trim();
-      const abs = path.resolve(repoDir, rel);
+      const rel = line.slice(3);
+      if (x === 'R' || x === 'C') i++; // skip original path token
+      const abs = path.resolve(root, rel);
 
       if (x !== ' ' && x !== '?') {
         changes.push({
@@ -102,10 +132,10 @@ export async function getGitStatus(repoDir: string): Promise<GitStatusInfo> {
 
   const recentCommits: GitStatusInfo['recentCommits'] = [];
   try {
-    const logOut = await runGit(repoDir, ['log', '-n', '15', '--pretty=format:%h|%s|%an|%ar']);
+    const logOut = await runGit(repoDir, ['log', '-n', '15', '--pretty=format:%h%x1f%s%x1f%an%x1f%ar']);
     for (const line of logOut.split(/\r?\n/)) {
       if (!line) continue;
-      const [hash, message, author, date] = line.split('|');
+      const [hash, message, author, date] = line.split('\x1f');
       recentCommits.push({ hash, message, author, date });
     }
   } catch {
@@ -120,14 +150,15 @@ export async function initGitRepo(repoDir: string): Promise<void> {
 }
 
 export async function stageGitFile(repoDir: string, relativePath: string): Promise<void> {
-  await runGit(repoDir, ['add', '--', relativePath]);
+  await runGit(await repoRoot(repoDir), ['add', '--', relativePath]);
 }
 
 export async function unstageGitFile(repoDir: string, relativePath: string): Promise<void> {
+  const root = await repoRoot(repoDir);
   try {
-    await runGit(repoDir, ['restore', '--staged', '--', relativePath]);
+    await runGit(root, ['restore', '--staged', '--', relativePath]);
   } catch {
-    await runGit(repoDir, ['reset', 'HEAD', '--', relativePath]);
+    await runGit(root, ['reset', 'HEAD', '--', relativePath]);
   }
 }
 
@@ -140,23 +171,24 @@ export async function commitGit(repoDir: string, message: string): Promise<strin
 }
 
 export async function getGitFileDiff(repoDir: string, relativePath: string, staged: boolean): Promise<{ original: string; modified: string }> {
+  const root = await repoRoot(repoDir);
   let original = '';
   try {
-    original = await runGit(repoDir, ['show', `HEAD:${relativePath}`]);
+    original = await runGit(root, ['show', `HEAD:${relativePath}`]);
   } catch {
     original = '';
   }
   let modified = '';
   if (staged) {
     try {
-      modified = await runGit(repoDir, ['show', `:${relativePath}`]);
+      modified = await runGit(root, ['show', `:${relativePath}`]);
     } catch {
       modified = '';
     }
   } else {
     const fs = await import('node:fs/promises');
     try {
-      modified = await fs.readFile(path.resolve(repoDir, relativePath), 'utf-8');
+      modified = await fs.readFile(path.resolve(root, relativePath), 'utf-8');
     } catch {
       modified = '';
     }
@@ -165,15 +197,21 @@ export async function getGitFileDiff(repoDir: string, relativePath: string, stag
 }
 
 export async function checkoutGitBranch(repoDir: string, branch: string, create = false): Promise<void> {
+  // Reject names git would interpret as options or that are not valid branch names
+  await runGit(repoDir, ['check-ref-format', '--branch', branch]);
+  if (branch.startsWith('-')) throw new Error(`Invalid branch name: ${branch}`);
   if (create) {
     await runGit(repoDir, ['checkout', '-b', branch]);
   } else {
-    await runGit(repoDir, ['checkout', branch]);
+    await runGit(repoDir, ['checkout', branch, '--']);
   }
 }
 
 export async function cloneGitRepo(url: string, targetDir: string): Promise<void> {
-  await execFileAsync('git', ['clone', url, targetDir], { env: getAugmentedEnv() });
+  await execFileAsync('git', ['clone', '--', url, targetDir], {
+    env: { ...getAugmentedEnv(), GIT_TERMINAL_PROMPT: '0' },
+    maxBuffer: 64 * 1024 * 1024,
+  });
 }
 
 export async function pullGit(repoDir: string): Promise<string> {

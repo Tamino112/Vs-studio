@@ -87,7 +87,15 @@ while True:
         except OSError:
             in_data = b""
         if not in_data:
+            # Parent (the IDE) closed the pipe / quit: hang up like a closed terminal window
             stdin_open = False
+            try:
+                os.killpg(pid, signal.SIGHUP)
+            except Exception:
+                try:
+                    os.kill(pid, signal.SIGHUP)
+                except Exception:
+                    pass
         else:
             _write_all(master, in_data)
 
@@ -194,6 +202,9 @@ export function spawnWithPty(
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    proc.stdin.on('error', () => {
+      // ignore EPIPE after the program exited
+    });
     return { proc, isPty: true };
   }
 
@@ -201,6 +212,9 @@ export function spawnWithPty(
     cwd: options.cwd,
     env: options.env,
     stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  proc.stdin.on('error', () => {
+    // ignore EPIPE after the program exited
   });
   return { proc, isPty: false };
 }
