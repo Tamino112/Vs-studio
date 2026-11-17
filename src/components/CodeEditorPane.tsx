@@ -16,6 +16,7 @@ import {
   getBuiltInCSharpCompletions,
   getBuiltInCSharpHover,
   getBuiltInCSharpSignatureHelp,
+  isDotCompletionPosition,
   mapLspCompletionKind,
 } from '../utils/csharpIntellisense';
 import { getBuiltInCSharpCodeActions } from '../utils/csharpDiagnostics';
@@ -151,8 +152,8 @@ function ensureCSharpProviders() {
   });
 
   monaco.languages.registerCompletionItemProvider('csharp', {
-    triggerCharacters: ['.', ' ', '{'],
-    provideCompletionItems: async (model, position) => {
+    triggerCharacters: ['.', ' ', '<', '(', '[', '{', '/'],
+    provideCompletionItems: async (model, position, context) => {
       const word = model.getWordUntilPosition(position);
       const range: monaco.IRange = {
         startLineNumber: position.lineNumber,
@@ -161,7 +162,20 @@ function ensureCSharpProviders() {
         endColumn: word.endColumn,
       };
 
-      const builtIn = getBuiltInCSharpCompletions(monaco, model, position);
+      const builtIn = getBuiltInCSharpCompletions(monaco, model, position, context);
+      const isDot = isDotCompletionPosition(model, position);
+
+      // Do not query LSP on plain space/slash/brace triggers when built-in context analyzer suppressed completions
+      if (
+        builtIn.length === 0 &&
+        !isDot &&
+        (context.triggerCharacter === ' ' ||
+          context.triggerCharacter === '/' ||
+          context.triggerCharacter === '{')
+      ) {
+        return { suggestions: [] };
+      }
+
       const tab = getTabForModel(model);
       if (!tab || tab.kind !== 'code' || !window.vsApi) {
         return { suggestions: builtIn };
@@ -174,7 +188,11 @@ function ensureCSharpProviders() {
           position.column - 1,
         )) as { items?: LspCompletionItem[] } | LspCompletionItem[] | null;
 
-        const lspItems = Array.isArray(res) ? res : res?.items || [];
+        const rawLspItems = Array.isArray(res) ? res : res?.items || [];
+        const lspItems = isDot
+          ? rawLspItems.filter((item) => item.kind !== 14 && item.kind !== 15 && item.kind !== 1)
+          : rawLspItems;
+
         if (lspItems.length === 0) {
           return { suggestions: builtIn };
         }
@@ -584,10 +602,19 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       smoothScrolling: true,
       tabSize: 4,
       insertSpaces: true,
-      quickSuggestions: { other: 'on', comments: 'off', strings: 'on' },
+      tabCompletion: 'on',
+      wordBasedSuggestions: 'off',
+      quickSuggestions: { other: 'on', comments: 'off', strings: 'off' },
       quickSuggestionsDelay: 40,
       suggestOnTriggerCharacters: true,
       acceptSuggestionOnCommitCharacter: true,
+      suggest: {
+        showWords: false,
+        localityBonus: true,
+        filterGraceful: true,
+        snippetsPreventQuickSuggestions: false,
+        preview: false,
+      },
       lightbulb: { enabled: monaco.editor.ShowLightbulbIconMode.On },
       parameterHints: { enabled: true },
       'semanticHighlighting.enabled': true,

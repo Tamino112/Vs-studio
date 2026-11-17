@@ -322,6 +322,14 @@ export function analyzeCSharpCode(filePath: string, projectName: string, code: s
   while ((m = paramDecl.exec(masked)) !== null) {
     declaredSymbols.add(m[1]);
   }
+  const outVarDecl = /\bout\s+(?:var|[A-Za-z_][\w<>[\]?,.\s]*?)\s+([A-Za-z_]\w*)\b/g;
+  while ((m = outVarDecl.exec(masked)) !== null) {
+    if (!CSHARP_KEYWORDS_SET.has(m[1])) declaredSymbols.add(m[1]);
+  }
+  const isPatternDecl = /\bis\s+(?:not\s+)?[A-Za-z_][\w<>[\]?]*\s+([A-Za-z_]\w*)\b/g;
+  while ((m = isPatternDecl.exec(masked)) !== null) {
+    if (!CSHARP_KEYWORDS_SET.has(m[1])) declaredSymbols.add(m[1]);
+  }
 
   // 4. Case-sensitivity typos on common BCL types (e.g. `console.WriteLine`)
   const identRegex = /\b([a-z][A-Za-z0-9_]*)\b/g;
