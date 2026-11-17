@@ -6,6 +6,7 @@ import {
   DebugState,
   DebugVariable,
   DiagnosticItem,
+  DocumentSplitMode,
   DotnetTemplate,
   EnvironmentStatus,
   FileNode,
@@ -19,10 +20,36 @@ import {
   RightPanelId,
   SearchMatch,
   SolutionInfo,
+  TabLayoutPosition,
+  TaskListItem,
   TestCaseResult,
   VsThemeId,
 } from '../types/ide';
 import { applyThemeToDom } from '../themes/vsThemes';
+import { extractTodoTasks } from '../utils/csharpOutline';
+
+const PROJECT_TAB_COLORS = [
+  '#007ACC', // Visual Studio Blue
+  '#68217A', // Visual Studio Purple
+  '#388A34', // C# Green
+  '#CA5100', // Amber / Orange
+  '#008272', // Teal
+  '#B4009E', // Magenta
+  '#D13438', // Crimson
+  '#038387', // Cyan
+];
+
+function getProjectColor(solution: SolutionInfo | null, filePath: string): { projectId?: string; projectName?: string; projectColor?: string } {
+  if (!solution) return {};
+  const idx = solution.projects.findIndex((p) => filePath.startsWith(p.dir));
+  if (idx === -1) return {};
+  const p = solution.projects[idx];
+  return {
+    projectId: p.id,
+    projectName: p.name,
+    projectColor: PROJECT_TAB_COLORS[idx % PROJECT_TAB_COLORS.length],
+  };
+}
 
 function detectLanguage(filePath: string): string {
   const lower = filePath.toLowerCase();
@@ -47,6 +74,9 @@ export interface IdeState {
   wordWrap: boolean;
   minimap: boolean;
   showAllFiles: boolean;
+  tabLayout: TabLayoutPosition;
+  colorizeTabsByProject: boolean;
+  editorZoom: number;
 
   envStatus: EnvironmentStatus | null;
   templates: DotnetTemplate[];
@@ -61,6 +91,10 @@ export interface IdeState {
 
   openTabs: OpenTab[];
   activeTabId: string | null;
+  splitMode: DocumentSplitMode;
+  activeGroupId: number;
+  activeTabByGroup: Record<number, string | null>;
+  pendingInsertSnippet: { id: number; text: string } | null;
 
   buildDiagnostics: DiagnosticItem[];
   lspDiagnosticsByFile: Record<string, DiagnosticItem[]>;
@@ -77,6 +111,7 @@ export interface IdeState {
   gitStatus: GitStatusInfo | null;
   tests: TestCaseResult[];
   searchResults: SearchMatch[];
+  taskListItems: TaskListItem[];
   selectedPropertyTarget: {
     kind: 'solution' | 'project' | 'file';
     id: string;
@@ -84,14 +119,17 @@ export interface IdeState {
     path: string;
   } | null;
 
-  // Dock layout
+  // Dock layout + Auto-Hide Pins
   leftOpen: boolean;
+  leftPinned: boolean;
   leftPanel: LeftPanelId;
   leftWidth: number;
   rightOpen: boolean;
+  rightPinned: boolean;
   rightPanel: RightPanelId;
   rightWidth: number;
   bottomOpen: boolean;
+  bottomPinned: boolean;
   bottomPanel: BottomPanelId;
   bottomHeight: number;
 
@@ -113,16 +151,25 @@ export interface IdeState {
   setWordWrap: (wrap: boolean) => void;
   setMinimap: (show: boolean) => void;
   setShowAllFiles: (show: boolean) => Promise<void>;
+  setTabLayout: (layout: TabLayoutPosition) => void;
+  setColorizeTabsByProject: (enabled: boolean) => void;
+  setEditorZoom: (zoom: number) => void;
   setScreen: (screen: 'start' | 'ide') => void;
 
   openSolution: (targetPath: string) => Promise<void>;
   closeSolution: () => void;
   refreshSolutionTrees: () => Promise<void>;
+  refreshTaskList: () => Promise<void>;
   setStartupProject: (projectId: string) => void;
   setConfiguration: (cfg: 'Debug' | 'Release') => void;
   setPlatform: (plat: 'Any CPU' | 'arm64' | 'x64') => void;
 
-  openFile: (filePath: string, line?: number, column?: number) => Promise<void>;
+  openFile: (
+    filePath: string,
+    line?: number,
+    column?: number,
+    options?: { preview?: boolean; groupId?: number },
+  ) => Promise<void>;
   openNugetTab: (projectId?: string) => void;
   openDiffTab: (title: string, path: string, original: string, modified: string) => void;
   updateTabContent: (tabId: string, content: string) => void;
@@ -130,7 +177,18 @@ export interface IdeState {
   saveTab: (tabId: string) => Promise<void>;
   saveAllTabs: () => Promise<void>;
   closeTab: (tabId: string) => void;
-  setActiveTab: (tabId: string) => void;
+  closeAllTabs: (groupId?: number) => void;
+  closeOtherTabs: (tabId: string) => void;
+  closeTabsToRight: (tabId: string) => void;
+  closeTabsToLeft: (tabId: string) => void;
+  togglePinTab: (tabId: string) => void;
+  promotePreviewTab: (tabId: string) => void;
+  reorderTab: (fromTabId: string, toTabId: string) => void;
+  moveTabToGroup: (tabId: string, targetGroupId: number) => void;
+  setSplitMode: (mode: DocumentSplitMode) => void;
+  setActiveGroup: (groupId: number) => void;
+  setActiveTab: (tabId: string, groupId?: number) => void;
+  insertSnippetIntoEditor: (text: string) => void;
 
   appendOutput: (channel: OutputChannelName, line: string) => void;
   clearOutput: (channel: OutputChannelName) => void;
@@ -155,7 +213,25 @@ export interface IdeState {
   runSearchInFiles: (query: string, opts?: { matchCase?: boolean; wholeWord?: boolean; fileMask?: string }) => Promise<void>;
   setSelectedPropertyTarget: (target: IdeState['selectedPropertyTarget']) => void;
 
-  setDock: (partial: Partial<Pick<IdeState, 'leftOpen' | 'leftPanel' | 'leftWidth' | 'rightOpen' | 'rightPanel' | 'rightWidth' | 'bottomOpen' | 'bottomPanel' | 'bottomHeight'>>) => void;
+  setDock: (
+    partial: Partial<
+      Pick<
+        IdeState,
+        | 'leftOpen'
+        | 'leftPinned'
+        | 'leftPanel'
+        | 'leftWidth'
+        | 'rightOpen'
+        | 'rightPinned'
+        | 'rightPanel'
+        | 'rightWidth'
+        | 'bottomOpen'
+        | 'bottomPinned'
+        | 'bottomPanel'
+        | 'bottomHeight'
+      >
+    >,
+  ) => void;
   setDialog: (partial: Partial<Pick<IdeState, 'newProjectOpen' | 'addNewProjectOpen' | 'addProjectRefSourceId' | 'addNewItemTargetDir' | 'findInFilesOpen' | 'quickLaunchOpen' | 'toolsOptionsOpen' | 'cloneRepoOpen'>>) => void;
   refreshEnvironment: () => Promise<void>;
   refreshRecent: () => Promise<void>;
@@ -163,6 +239,8 @@ export interface IdeState {
 
 const savedTheme = (localStorage.getItem('vs.theme') as VsThemeId) || 'dark';
 const savedKeymap = (localStorage.getItem('vs.keymap') as KeymapMode) || 'macos';
+const savedTabLayout = (localStorage.getItem('vs.tabLayout') as TabLayoutPosition) || 'top';
+const savedColorize = localStorage.getItem('vs.colorizeTabs') !== 'false';
 applyThemeToDom(savedTheme);
 
 export const useIdeStore = create<IdeState>((set, get) => ({
@@ -173,6 +251,9 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   wordWrap: false,
   minimap: true,
   showAllFiles: false,
+  tabLayout: savedTabLayout,
+  colorizeTabsByProject: savedColorize,
+  editorZoom: 100,
 
   envStatus: null,
   templates: [],
@@ -187,6 +268,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
   openTabs: [],
   activeTabId: null,
+  splitMode: 'none',
+  activeGroupId: 0,
+  activeTabByGroup: { 0: null, 1: null },
+  pendingInsertSnippet: null,
 
   buildDiagnostics: [],
   lspDiagnosticsByFile: {},
@@ -209,15 +294,19 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   gitStatus: null,
   tests: [],
   searchResults: [],
+  taskListItems: [],
   selectedPropertyTarget: null,
 
   leftOpen: true,
+  leftPinned: true,
   leftPanel: 'solutionExplorer',
   leftWidth: 280,
   rightOpen: false,
+  rightPinned: true,
   rightPanel: 'properties',
   rightWidth: 300,
   bottomOpen: true,
+  bottomPinned: true,
   bottomPanel: 'errorList',
   bottomHeight: 220,
 
@@ -270,6 +359,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     set({ showAllFiles });
     await get().refreshSolutionTrees();
   },
+  setTabLayout: (tabLayout) => {
+    localStorage.setItem('vs.tabLayout', tabLayout);
+    set({ tabLayout });
+  },
+  setColorizeTabsByProject: (colorizeTabsByProject) => {
+    localStorage.setItem('vs.colorizeTabs', String(colorizeTabsByProject));
+    set({ colorizeTabsByProject });
+  },
+  setEditorZoom: (editorZoom) => set({ editorZoom: Math.max(50, Math.min(200, editorZoom)) }),
   setScreen: (screen) => set({ screen }),
 
   openSolution: async (targetPath) => {
@@ -279,8 +377,12 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       screen: 'ide',
       openTabs: [],
       activeTabId: null,
+      splitMode: 'none',
+      activeGroupId: 0,
+      activeTabByGroup: { 0: null, 1: null },
       buildDiagnostics: [],
       lspDiagnosticsByFile: {},
+      taskListItems: [],
       statusText: `Loaded solution '${sln.name}' (${sln.projects.length} project${sln.projects.length === 1 ? '' : 's'})`,
       selectedPropertyTarget: {
         kind: 'solution',
@@ -292,6 +394,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     await get().refreshSolutionTrees();
     await get().refreshGitStatus();
     await get().refreshRecent();
+    void get().refreshTaskList();
 
     // Start C# LSP if installed (await so initial didOpen is not dropped)
     const env = get().envStatus;
@@ -326,10 +429,14 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       projectTrees: {},
       openTabs: [],
       activeTabId: null,
+      splitMode: 'none',
+      activeGroupId: 0,
+      activeTabByGroup: { 0: null, 1: null },
       buildDiagnostics: [],
       lspDiagnosticsByFile: {},
       gitStatus: null,
       tests: [],
+      taskListItems: [],
       screen: 'start',
       statusText: 'Ready',
     });
@@ -352,6 +459,23 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     set({ projectTrees: trees });
   },
 
+  refreshTaskList: async () => {
+    const sln = get().solution;
+    if (!sln || !window.vsApi) return;
+    const matches = (await window.vsApi.fs.search(sln.dir, '//', {})) as SearchMatch[];
+    const seen = new Set<string>();
+    const items: TaskListItem[] = [];
+    for (const m of matches) {
+      if (seen.has(`${m.file}:${m.line}`)) continue;
+      seen.add(`${m.file}:${m.line}`);
+      const parsed = extractTodoTasks(m.file, m.lineText);
+      for (const p of parsed) {
+        items.push({ ...p, id: `${m.file}:${m.line}`, line: m.line });
+      }
+    }
+    set({ taskListItems: items });
+  },
+
   setStartupProject: (projectId) => {
     const sln = get().solution;
     if (!sln) return;
@@ -361,17 +485,26 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   setConfiguration: (activeConfiguration) => set({ activeConfiguration }),
   setPlatform: (activePlatform) => set({ activePlatform }),
 
-  openFile: async (filePath, line, column) => {
+  openFile: async (filePath, line, column, options) => {
+    const targetGroup = options?.groupId ?? get().activeGroupId ?? 0;
+    const isPreview = Boolean(options?.preview);
     const existing = get().openTabs.find((t) => t.kind === 'code' && t.path === filePath);
+
     if (existing) {
-      set({
+      const grp = existing.groupId ?? 0;
+      set((s) => ({
         activeTabId: existing.id,
-        openTabs: get().openTabs.map((t) =>
-          t.id === existing.id && line !== undefined
-            ? { ...t, cursorLine: line, cursorColumn: column ?? 1 }
-            : t,
-        ),
-      });
+        activeGroupId: grp,
+        activeTabByGroup: { ...s.activeTabByGroup, [grp]: existing.id },
+        openTabs: s.openTabs.map((t) => {
+          if (t.id !== existing.id) return t;
+          return {
+            ...t,
+            isPreview: isPreview ? t.isPreview : false,
+            ...(line !== undefined ? { cursorLine: line, cursorColumn: column ?? 1 } : {}),
+          };
+        }),
+      }));
       return;
     }
 
@@ -379,6 +512,8 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     const title = filePath.split(/[/\\]/).pop() || filePath;
     const language = detectLanguage(filePath);
     const id = `code:${filePath}`;
+    const projMeta = getProjectColor(get().solution, filePath);
+
     const newTab: OpenTab = {
       id,
       kind: 'code',
@@ -390,11 +525,25 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       isDirty: false,
       cursorLine: line ?? 1,
       cursorColumn: column ?? 1,
+      isPreview,
+      isPinned: false,
+      groupId: targetGroup,
+      ...projMeta,
     };
-    set((s) => ({
-      openTabs: [...s.openTabs, newTab],
-      activeTabId: id,
-    }));
+
+    set((s) => {
+      // If opening as Preview Tab, replace any existing unmodified preview tab in the same group
+      let nextTabs = isPreview
+        ? s.openTabs.filter((t) => !(t.isPreview && !t.isDirty && (t.groupId ?? 0) === targetGroup))
+        : [...s.openTabs];
+      nextTabs = [...nextTabs, newTab];
+      return {
+        openTabs: nextTabs,
+        activeTabId: id,
+        activeGroupId: targetGroup,
+        activeTabByGroup: { ...s.activeTabByGroup, [targetGroup]: id },
+      };
+    });
 
     if (language === 'csharp') {
       void window.vsApi.lsp.didOpen(filePath, content);
@@ -405,10 +554,17 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     const id = `nuget:${projectId || 'solution'}`;
     const existing = get().openTabs.find((t) => t.id === id);
     if (existing) {
-      set({ activeTabId: id });
+      const grp = existing.groupId ?? 0;
+      set((s) => ({
+        activeTabId: id,
+        activeGroupId: grp,
+        activeTabByGroup: { ...s.activeTabByGroup, [grp]: id },
+      }));
       return;
     }
-    const proj = get().solution?.projects.find((p) => p.id === projectId);
+    const projIdx = get().solution?.projects.findIndex((p) => p.id === projectId) ?? -1;
+    const proj = projIdx >= 0 ? get().solution?.projects[projIdx] : undefined;
+    const grp = get().activeGroupId ?? 0;
     const newTab: OpenTab = {
       id,
       kind: 'nuget',
@@ -419,22 +575,34 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       language: 'plaintext',
       isDirty: false,
       projectId,
+      projectName: proj?.name,
+      projectColor: projIdx >= 0 ? PROJECT_TAB_COLORS[projIdx % PROJECT_TAB_COLORS.length] : '#004880',
+      groupId: grp,
     };
-    set((s) => ({ openTabs: [...s.openTabs, newTab], activeTabId: id }));
+    set((s) => ({
+      openTabs: [...s.openTabs, newTab],
+      activeTabId: id,
+      activeTabByGroup: { ...s.activeTabByGroup, [grp]: id },
+    }));
   },
 
   openDiffTab: (title, filePath, original, modified) => {
     const id = `diff:${filePath}`;
     const existing = get().openTabs.find((t) => t.id === id);
     if (existing) {
-      set({
-        openTabs: get().openTabs.map((t) =>
+      const grp = existing.groupId ?? 0;
+      set((s) => ({
+        openTabs: s.openTabs.map((t) =>
           t.id === id ? { ...t, diffOriginal: original, diffModified: modified } : t,
         ),
         activeTabId: id,
-      });
+        activeGroupId: grp,
+        activeTabByGroup: { ...s.activeTabByGroup, [grp]: id },
+      }));
       return;
     }
+    const grp = get().activeGroupId ?? 0;
+    const projMeta = getProjectColor(get().solution, filePath);
     const newTab: OpenTab = {
       id,
       kind: 'diff',
@@ -446,8 +614,14 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       isDirty: false,
       diffOriginal: original,
       diffModified: modified,
+      groupId: grp,
+      ...projMeta,
     };
-    set((s) => ({ openTabs: [...s.openTabs, newTab], activeTabId: id }));
+    set((s) => ({
+      openTabs: [...s.openTabs, newTab],
+      activeTabId: id,
+      activeTabByGroup: { ...s.activeTabByGroup, [grp]: id },
+    }));
   },
 
   updateTabContent: (tabId, content) => {
@@ -455,7 +629,9 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     if (!tab) return;
     set((s) => ({
       openTabs: s.openTabs.map((t) =>
-        t.id === tabId ? { ...t, content, isDirty: content !== t.savedContent } : t,
+        t.id === tabId
+          ? { ...t, content, isDirty: content !== t.savedContent, isPreview: false }
+          : t,
       ),
     }));
     if (tab.kind === 'code' && tab.language === 'csharp') {
@@ -477,7 +653,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     await window.vsApi.fs.writeFile(tab.path, tab.content);
     set((s) => ({
       openTabs: s.openTabs.map((t) =>
-        t.id === tabId ? { ...t, savedContent: t.content, isDirty: false } : t,
+        t.id === tabId ? { ...t, savedContent: t.content, isDirty: false, isPreview: false } : t,
       ),
       statusText: `Item(s) Saved (${tab.title})`,
     }));
@@ -493,6 +669,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       }
     }
     void get().refreshGitStatus();
+    void get().refreshTaskList();
   },
 
   saveAllTabs: async () => {
@@ -504,17 +681,225 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
   closeTab: (tabId) => {
     set((s) => {
-      const idx = s.openTabs.findIndex((t) => t.id === tabId);
+      const target = s.openTabs.find((t) => t.id === tabId);
+      const grp = target?.groupId ?? 0;
+      const groupTabs = s.openTabs.filter((t) => (t.groupId ?? 0) === grp);
+      const idxInGroup = groupTabs.findIndex((t) => t.id === tabId);
       const next = s.openTabs.filter((t) => t.id !== tabId);
-      let nextActive = s.activeTabId;
-      if (s.activeTabId === tabId) {
-        nextActive = next[idx]?.id ?? next[idx - 1]?.id ?? null;
+      const nextGroupTabs = next.filter((t) => (t.groupId ?? 0) === grp);
+
+      let nextGroupActive = s.activeTabByGroup[grp];
+      if (nextGroupActive === tabId) {
+        nextGroupActive = nextGroupTabs[idxInGroup]?.id ?? nextGroupTabs[idxInGroup - 1]?.id ?? null;
       }
-      return { openTabs: next, activeTabId: nextActive };
+
+      const nextActiveByGroup = { ...s.activeTabByGroup, [grp]: nextGroupActive };
+      let nextSplit = s.splitMode;
+      let nextActiveGroup = s.activeGroupId;
+      if (grp === 1 && nextGroupTabs.length === 0) {
+        nextSplit = 'none';
+        nextActiveGroup = 0;
+      }
+
+      const nextActiveGlobal =
+        s.activeTabId === tabId
+          ? nextActiveByGroup[nextActiveGroup] ?? next[0]?.id ?? null
+          : s.activeTabId;
+
+      return {
+        openTabs: next,
+        activeTabId: nextActiveGlobal,
+        activeTabByGroup: nextActiveByGroup,
+        splitMode: nextSplit,
+        activeGroupId: nextActiveGroup,
+      };
     });
   },
 
-  setActiveTab: (tabId) => set({ activeTabId: tabId }),
+  closeAllTabs: (groupId) => {
+    set((s) => {
+      const next =
+        groupId === undefined
+          ? []
+          : s.openTabs.filter((t) => (t.groupId ?? 0) !== groupId);
+      const g0 = next.find((t) => (t.groupId ?? 0) === 0)?.id ?? null;
+      const g1 = next.find((t) => (t.groupId ?? 0) === 1)?.id ?? null;
+      return {
+        openTabs: next,
+        activeTabByGroup: { 0: g0, 1: g1 },
+        activeTabId: g0 ?? g1,
+        splitMode: g1 ? s.splitMode : 'none',
+        activeGroupId: g0 ? 0 : g1 ? 1 : 0,
+      };
+    });
+  },
+
+  closeOtherTabs: (tabId) => {
+    set((s) => {
+      const keep = s.openTabs.find((t) => t.id === tabId);
+      if (!keep) return {};
+      const grp = keep.groupId ?? 0;
+      const next = s.openTabs.filter((t) => (t.groupId ?? 0) !== grp || t.id === tabId || t.isPinned);
+      return {
+        openTabs: next,
+        activeTabId: tabId,
+        activeTabByGroup: { ...s.activeTabByGroup, [grp]: tabId },
+      };
+    });
+  },
+
+  closeTabsToRight: (tabId) => {
+    set((s) => {
+      const target = s.openTabs.find((t) => t.id === tabId);
+      if (!target) return {};
+      const grp = target.groupId ?? 0;
+      const groupTabs = s.openTabs.filter((t) => (t.groupId ?? 0) === grp);
+      const idx = groupTabs.findIndex((t) => t.id === tabId);
+      const toRemove = new Set(groupTabs.slice(idx + 1).filter((t) => !t.isPinned).map((t) => t.id));
+      const next = s.openTabs.filter((t) => !toRemove.has(t.id));
+      const nextGroupActive = toRemove.has(s.activeTabByGroup[grp] || '') ? tabId : s.activeTabByGroup[grp];
+      return {
+        openTabs: next,
+        activeTabId: toRemove.has(s.activeTabId || '') ? tabId : s.activeTabId,
+        activeTabByGroup: { ...s.activeTabByGroup, [grp]: nextGroupActive },
+      };
+    });
+  },
+
+  closeTabsToLeft: (tabId) => {
+    set((s) => {
+      const target = s.openTabs.find((t) => t.id === tabId);
+      if (!target) return {};
+      const grp = target.groupId ?? 0;
+      const groupTabs = s.openTabs.filter((t) => (t.groupId ?? 0) === grp);
+      const idx = groupTabs.findIndex((t) => t.id === tabId);
+      const toRemove = new Set(groupTabs.slice(0, idx).filter((t) => !t.isPinned).map((t) => t.id));
+      const next = s.openTabs.filter((t) => !toRemove.has(t.id));
+      const nextGroupActive = toRemove.has(s.activeTabByGroup[grp] || '') ? tabId : s.activeTabByGroup[grp];
+      return {
+        openTabs: next,
+        activeTabId: toRemove.has(s.activeTabId || '') ? tabId : s.activeTabId,
+        activeTabByGroup: { ...s.activeTabByGroup, [grp]: nextGroupActive },
+      };
+    });
+  },
+
+  togglePinTab: (tabId) => {
+    set((s) => {
+      const updated = s.openTabs.map((t) =>
+        t.id === tabId ? { ...t, isPinned: !t.isPinned, isPreview: false } : t,
+      );
+      // Keep pinned tabs grouped before unpinned tabs within each document group
+      updated.sort((a, b) => {
+        if ((a.groupId ?? 0) !== (b.groupId ?? 0)) return (a.groupId ?? 0) - (b.groupId ?? 0);
+        if (Boolean(a.isPinned) !== Boolean(b.isPinned)) return a.isPinned ? -1 : 1;
+        return 0;
+      });
+      return { openTabs: updated };
+    });
+  },
+
+  promotePreviewTab: (tabId) => {
+    set((s) => ({
+      openTabs: s.openTabs.map((t) => (t.id === tabId ? { ...t, isPreview: false } : t)),
+    }));
+  },
+
+  reorderTab: (fromTabId, toTabId) => {
+    if (fromTabId === toTabId) return;
+    set((s) => {
+      const list = [...s.openTabs];
+      const fromIdx = list.findIndex((t) => t.id === fromTabId);
+      const toIdx = list.findIndex((t) => t.id === toTabId);
+      if (fromIdx === -1 || toIdx === -1) return {};
+      const targetGroup = list[toIdx].groupId ?? 0;
+      const [moved] = list.splice(fromIdx, 1);
+      moved.groupId = targetGroup;
+      list.splice(toIdx, 0, moved);
+      return { openTabs: list };
+    });
+  },
+
+  moveTabToGroup: (tabId, targetGroupId) => {
+    set((s) => {
+      const target = s.openTabs.find((t) => t.id === tabId);
+      if (!target) return {};
+      const prevGroup = target.groupId ?? 0;
+      const nextTabs = s.openTabs.map((t) =>
+        t.id === tabId ? { ...t, groupId: targetGroupId, isPreview: false } : t,
+      );
+      const prevGroupRemaining = nextTabs.filter((t) => (t.groupId ?? 0) === prevGroup);
+      const nextSplit: DocumentSplitMode =
+        targetGroupId === 1
+          ? s.splitMode === 'none'
+            ? 'vertical'
+            : s.splitMode
+          : nextTabs.some((t) => (t.groupId ?? 0) === 1)
+          ? s.splitMode
+          : 'none';
+      return {
+        openTabs: nextTabs,
+        splitMode: nextSplit,
+        activeGroupId: targetGroupId,
+        activeTabId: tabId,
+        activeTabByGroup: {
+          ...s.activeTabByGroup,
+          [prevGroup]: prevGroupRemaining[0]?.id ?? null,
+          [targetGroupId]: tabId,
+        },
+      };
+    });
+  },
+
+  setSplitMode: (mode) => {
+    set((s) => {
+      if (mode === 'none') {
+        // Merge group 1 tabs back into group 0
+        const nextTabs = s.openTabs.map((t) => ({ ...t, groupId: 0 }));
+        return {
+          splitMode: 'none',
+          activeGroupId: 0,
+          openTabs: nextTabs,
+          activeTabByGroup: { 0: s.activeTabId ?? nextTabs[0]?.id ?? null, 1: null },
+        };
+      }
+      // If group 1 has no tabs yet and there are >=2 tabs in group 0, move active or last tab to group 1
+      const hasGroup1 = s.openTabs.some((t) => (t.groupId ?? 0) === 1);
+      if (!hasGroup1 && s.openTabs.length >= 2) {
+        const toMove =
+          s.openTabs.find((t) => t.id !== s.activeTabId) || s.openTabs[s.openTabs.length - 1];
+        const nextTabs = s.openTabs.map((t) => (t.id === toMove.id ? { ...t, groupId: 1 } : t));
+        return {
+          splitMode: mode,
+          openTabs: nextTabs,
+          activeTabByGroup: {
+            0: s.activeTabId ?? nextTabs.find((t) => (t.groupId ?? 0) === 0)?.id ?? null,
+            1: toMove.id,
+          },
+        };
+      }
+      return { splitMode: mode };
+    });
+  },
+
+  setActiveGroup: (groupId) => {
+    const activeInGrp = get().activeTabByGroup[groupId] ?? get().openTabs.find((t) => (t.groupId ?? 0) === groupId)?.id ?? null;
+    set({ activeGroupId: groupId, activeTabId: activeInGrp ?? get().activeTabId });
+  },
+
+  setActiveTab: (tabId, groupId) => {
+    const tab = get().openTabs.find((t) => t.id === tabId);
+    const grp = groupId ?? tab?.groupId ?? 0;
+    set((s) => ({
+      activeTabId: tabId,
+      activeGroupId: grp,
+      activeTabByGroup: { ...s.activeTabByGroup, [grp]: tabId },
+    }));
+  },
+
+  insertSnippetIntoEditor: (text) => {
+    set({ pendingInsertSnippet: { id: Date.now(), text } });
+  },
 
   appendOutput: (channel, line) => {
     set((s) => {

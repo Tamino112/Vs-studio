@@ -131,8 +131,9 @@ export const SolutionExplorer: React.FC = () => {
         onClick={() => {
           setSelectedKey(key);
           setSelectedPropertyTarget({ kind: 'file', id: key, name: node.name, path: node.path });
+          void openFile(node.path, undefined, undefined, { preview: true });
         }}
-        onDoubleClick={() => openFile(node.path)}
+        onDoubleClick={() => void openFile(node.path)}
         onContextMenu={(e) => {
           e.preventDefault();
           setSelectedKey(key);

@@ -615,16 +615,208 @@ export const DebugBottomPanel: React.FC<{
                 {bp.file.split(/[/\\]/).pop()}, line {bp.line}
               </span>
             </div>
-            <button
-              className="vs-btn"
-              style={{ padding: '1px 6px', fontSize: 11 }}
-              onClick={() => removeBreakpoint(bp.id)}
-            >
-              Remove
-            </button>
-          </div>
-        ))
-      )}
+              <button
+                className="vs-btn"
+                style={{ padding: '1px 6px', fontSize: 11 }}
+                onClick={() => removeBreakpoint(bp.id)}
+              >
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  };
+
+export const TaskListPanel: React.FC = () => {
+  const { taskListItems, refreshTaskList, openFile, solution } = useIdeStore();
+  const [filter, setFilter] = useState('');
+
+  const visible = taskListItems.filter((item) => {
+    if (!filter.trim()) return true;
+    const q = filter.toLowerCase();
+    return (
+      item.tag.toLowerCase().includes(q) ||
+      item.description.toLowerCase().includes(q) ||
+      item.file.toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '4px 8px',
+          borderBottom: '1px solid var(--vs-border-subtle)',
+          background: 'var(--vs-bg-panel)',
+        }}
+      >
+        <button
+          className="vs-btn"
+          disabled={!solution}
+          onClick={() => void refreshTaskList()}
+          style={{ padding: '2px 8px', fontSize: 11 }}
+        >
+          <span className="codicon codicon-refresh" /> Refresh
+        </button>
+        <span style={{ fontSize: 11, color: 'var(--vs-fg-muted)' }}>
+          Comments matching TODO, HACK, FIXME, UNDONE ({visible.length})
+        </span>
+        <div style={{ flex: 1 }} />
+        <input
+          className="vs-input"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Search Task List"
+          style={{ width: 200, height: 20, fontSize: 11 }}
+        />
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+          <thead>
+            <tr style={{ background: 'var(--vs-bg-panel)', borderBottom: '1px solid var(--vs-border)', textAlign: 'left' }}>
+              <th style={{ padding: '4px 8px', width: 70 }}>Priority</th>
+              <th style={{ padding: '4px 8px', width: 75 }}>Tag</th>
+              <th style={{ padding: '4px 8px' }}>Description</th>
+              <th style={{ padding: '4px 8px', width: 190 }}>File</th>
+              <th style={{ padding: '4px 8px', width: 55 }}>Line</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.length === 0 ? (
+              <tr>
+                <td colSpan={5} style={{ padding: 14, color: 'var(--vs-fg-muted)' }}>
+                  No TODO / HACK / FIXME / UNDONE comments found in solution.
+                </td>
+              </tr>
+            ) : (
+              visible.map((t) => (
+                <tr
+                  key={t.id}
+                  onDoubleClick={() => void openFile(t.file, t.line, 1)}
+                  onClick={() => void openFile(t.file, t.line, 1, { preview: true })}
+                  style={{ borderBottom: '1px solid var(--vs-border-subtle)', cursor: 'pointer' }}
+                >
+                  <td
+                    style={{
+                      padding: '3px 8px',
+                      color: t.priority === 'High' ? 'var(--vs-warning)' : 'var(--vs-fg-muted)',
+                      fontWeight: t.priority === 'High' ? 600 : 400,
+                    }}
+                  >
+                    {t.priority}
+                  </td>
+                  <td style={{ padding: '3px 8px', fontWeight: 600 }}>{t.tag}</td>
+                  <td style={{ padding: '3px 8px' }}>{t.description}</td>
+                  <td style={{ padding: '3px 8px', color: 'var(--vs-fg-muted)' }}>
+                    {t.file.split(/[/\\]/).pop()}
+                  </td>
+                  <td style={{ padding: '3px 8px' }}>{t.line}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
+
+export const ImmediateWindowPanel: React.FC = () => {
+  const { debugState, debugFrames } = useIdeStore();
+  const [history, setHistory] = useState<string[]>([
+    'Immediate Window — Enter C# expressions while paused at a breakpoint, or type "clear".',
+  ]);
+  const [expr, setExpr] = useState('');
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'auto' });
+  }, [history.length]);
+
+  const handleEval = async () => {
+    const trimmed = expr.trim();
+    if (!trimmed) return;
+    setExpr('');
+    if (trimmed === 'clear' || trimmed === 'cls') {
+      setHistory([]);
+      return;
+    }
+
+    if (debugState !== 'paused') {
+      setHistory((h) => [
+        ...h,
+        `> ${trimmed}`,
+        'The expression cannot be evaluated while not paused in the debugger. Hit a breakpoint (F9 + F5) first.',
+      ]);
+      return;
+    }
+
+    try {
+      const topFrameId = debugFrames[0]?.id;
+      const result = await window.vsApi.debug.evaluate(trimmed, topFrameId);
+      setHistory((h) => [...h, `> ${trimmed}`, result]);
+    } catch (e) {
+      setHistory((h) => [...h, `> ${trimmed}`, `Error: ${(e as Error).message}`]);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div
+        className="mono"
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '6px 10px',
+          fontSize: 12,
+          lineHeight: 1.45,
+          userSelect: 'text',
+        }}
+      >
+        {history.map((line, idx) => (
+          <div
+            key={idx}
+            style={{
+              whiteSpace: 'pre-wrap',
+              color: line.startsWith('>') ? 'var(--vs-accent)' : 'var(--vs-fg)',
+            }}
+          >
+            {line}
+          </div>
+        ))}
+        <div ref={endRef} />
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          borderTop: '1px solid var(--vs-border)',
+          background: 'var(--vs-bg-panel)',
+        }}
+      >
+        <span className="mono" style={{ color: 'var(--vs-accent)', fontWeight: 700 }}>
+          &gt;
+        </span>
+        <input
+          className="vs-input mono"
+          value={expr}
+          onChange={(e) => setExpr(e.target.value)}
+          placeholder="Evaluate C# expression (e.g. myVar, items.Count)..."
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void handleEval();
+          }}
+          style={{ flex: 1, border: 'none', background: 'transparent' }}
+        />
+      </div>
+    </div>
+  );
+};
+

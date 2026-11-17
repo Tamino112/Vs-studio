@@ -249,9 +249,20 @@ export const QuickLaunchDialog: React.FC = () => {
     { label: 'Tools: Manage NuGet Packages...', action: () => store.openNugetTab() },
     { label: 'Tools: Options...', action: () => store.setDialog({ toolsOptionsOpen: true }) },
     { label: 'View: Solution Explorer', action: () => store.setDock({ leftOpen: true, leftPanel: 'solutionExplorer' }) },
+    { label: 'View: Class View', action: () => store.setDock({ leftOpen: true, leftPanel: 'classView' }) },
+    { label: 'View: Toolbox', action: () => store.setDock({ leftOpen: true, leftPanel: 'toolbox' }) },
     { label: 'View: Git Changes', action: () => store.setDock({ rightOpen: true, rightPanel: 'gitChanges' }) },
     { label: 'View: Error List', action: () => store.setDock({ bottomOpen: true, bottomPanel: 'errorList' }) },
+    { label: 'View: Task List', action: () => store.setDock({ bottomOpen: true, bottomPanel: 'taskList' }) },
+    { label: 'View: Immediate Window', action: () => store.setDock({ bottomOpen: true, bottomPanel: 'immediate' }) },
     { label: 'View: Terminal', action: () => store.setDock({ bottomOpen: true, bottomPanel: 'terminal' }) },
+    { label: 'Window: New Vertical Tab Group', action: () => store.setSplitMode('vertical') },
+    { label: 'Window: New Horizontal Tab Group', action: () => store.setSplitMode('horizontal') },
+    { label: 'Window: Merge All Tab Groups', action: () => store.setSplitMode('none') },
+    { label: 'Window: Place Tabs on Top', action: () => store.setTabLayout('top') },
+    { label: 'Window: Place Tabs on Left (Vertical)', action: () => store.setTabLayout('left') },
+    { label: 'Window: Place Tabs on Right (Vertical)', action: () => store.setTabLayout('right') },
+    { label: 'Window: Close All Documents', action: () => store.closeAllTabs() },
   ].filter((c) => c.label.toLowerCase().includes(query.toLowerCase()));
 
   return (
@@ -308,6 +319,12 @@ export const ToolsOptionsDialog: React.FC = () => {
     setWordWrap,
     minimap,
     setMinimap,
+    tabLayout,
+    setTabLayout,
+    colorizeTabsByProject,
+    setColorizeTabsByProject,
+    editorZoom,
+    setEditorZoom,
     envStatus,
     refreshEnvironment,
   } = useIdeStore();
@@ -320,8 +337,8 @@ export const ToolsOptionsDialog: React.FC = () => {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {/* Environment */}
         <section>
-          <h4 style={{ marginBottom: 8, color: 'var(--vs-fg-bright)' }}>Environment &amp; Appearance</h4>
-          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 10, alignItems: 'center' }}>
+          <h4 style={{ marginBottom: 8, color: 'var(--vs-fg-bright)' }}>Environment, Tabs &amp; Appearance</h4>
+          <div style={{ display: 'grid', gridTemplateColumns: '210px 1fr', gap: 10, alignItems: 'center' }}>
             <span>Color theme:</span>
             <select
               className="vs-select"
@@ -343,6 +360,24 @@ export const ToolsOptionsDialog: React.FC = () => {
               <option value="windows">Windows Visual Studio (Ctrl+S, Ctrl+Shift+B, F5)</option>
             </select>
 
+            <span>Document tab layout:</span>
+            <select
+              className="vs-select"
+              value={tabLayout}
+              onChange={(e) => setTabLayout(e.target.value as 'top' | 'left' | 'right')}
+            >
+              <option value="top">Top (Horizontal Tabs)</option>
+              <option value="left">Left (Vertical Tabs)</option>
+              <option value="right">Right (Vertical Tabs)</option>
+            </select>
+
+            <span>Colorize tabs by project:</span>
+            <input
+              type="checkbox"
+              checked={colorizeTabsByProject}
+              onChange={(e) => setColorizeTabsByProject(e.target.checked)}
+            />
+
             <span>Editor Font Size:</span>
             <input
               type="number"
@@ -353,6 +388,20 @@ export const ToolsOptionsDialog: React.FC = () => {
               onChange={(e) => setFontSize(Number(e.target.value) || 13)}
               style={{ width: 90 }}
             />
+
+            <span>Editor Zoom (%):</span>
+            <select
+              className="vs-select"
+              value={editorZoom}
+              onChange={(e) => setEditorZoom(Number(e.target.value))}
+              style={{ width: 110 }}
+            >
+              {[50, 70, 85, 100, 115, 125, 150, 175, 200].map((z) => (
+                <option key={z} value={z}>
+                  {z} %
+                </option>
+              ))}
+            </select>
 
             <span>Word Wrap:</span>
             <input type="checkbox" checked={wordWrap} onChange={(e) => setWordWrap(e.target.checked)} />

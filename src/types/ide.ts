@@ -70,12 +70,19 @@ export interface OpenTab {
   language: string;
   isDirty: boolean;
   projectId?: string;
+  projectName?: string;
+  projectColor?: string;
   cursorLine?: number;
   cursorColumn?: number;
   diffOriginal?: string;
   diffModified?: string;
   isPinned?: boolean;
+  isPreview?: boolean;
+  groupId?: number;
 }
+
+export type TabLayoutPosition = 'top' | 'left' | 'right';
+export type DocumentSplitMode = 'none' | 'vertical' | 'horizontal';
 
 export interface DiagnosticItem {
   id: string;
@@ -200,7 +207,16 @@ export interface SearchMatch {
   lineText: string;
 }
 
-export type LeftPanelId = 'solutionExplorer' | 'toolbox' | 'serverExplorer';
+export interface TaskListItem {
+  id: string;
+  priority: 'High' | 'Normal' | 'Low';
+  tag: 'TODO' | 'HACK' | 'FIXME' | 'UNDONE';
+  description: string;
+  file: string;
+  line: number;
+}
+
+export type LeftPanelId = 'solutionExplorer' | 'classView' | 'toolbox';
 export type RightPanelId = 'gitChanges' | 'properties';
 export type BottomPanelId =
   | 'errorList'
@@ -208,6 +224,7 @@ export type BottomPanelId =
   | 'terminal'
   | 'testExplorer'
   | 'findResults'
+  | 'taskList'
   | 'locals'
   | 'watch'
   | 'callStack'

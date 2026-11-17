@@ -5,13 +5,16 @@ import { NewProjectWizard } from './components/NewProjectWizard';
 import { TitleBarAndMenu } from './components/TitleBarAndMenu';
 import { StandardToolbar } from './components/StandardToolbar';
 import { SolutionExplorer } from './components/SolutionExplorer';
+import { ClassViewPanel, ToolboxPanel } from './components/LeftExtraPanels';
 import { CodeEditorPane } from './components/CodeEditorPane';
 import { StatusBar } from './components/StatusBar';
 import {
   DebugBottomPanel,
   ErrorListPanel,
   FindResultsPanel,
+  ImmediateWindowPanel,
   OutputPanel,
+  TaskListPanel,
   TerminalPanel,
   TestExplorerPanel,
 } from './components/BottomPanels';
@@ -24,7 +27,7 @@ import {
   QuickLaunchDialog,
   ToolsOptionsDialog,
 } from './components/IdeDialogs';
-import { BottomPanelId, DiagnosticItem, OutputChannelName } from './types/ide';
+import { BottomPanelId, DiagnosticItem, LeftPanelId, OutputChannelName, RightPanelId } from './types/ide';
 
 export const App: React.FC = () => {
   const store = useIdeStore();
@@ -110,6 +113,11 @@ export const App: React.FC = () => {
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
         void s.saveAllTabs();
+      } else if (mod && e.key.toLowerCase() === 'w') {
+        if (s.activeTabId) {
+          e.preventDefault();
+          s.closeTab(s.activeTabId);
+        }
       } else if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         void s.buildSolution(e.altKey ? 'rebuild' : 'build');
@@ -138,17 +146,47 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  const leftTabs: Array<{ id: LeftPanelId; label: string; icon: string }> = [
+    { id: 'solutionExplorer', label: 'Solution Explorer', icon: 'codicon-root-folder' },
+    { id: 'classView', label: 'Class View', icon: 'codicon-symbol-class' },
+    { id: 'toolbox', label: 'Toolbox', icon: 'codicon-tools' },
+  ];
+
+  const rightTabs: Array<{ id: RightPanelId; label: string; icon: string }> = [
+    { id: 'properties', label: 'Properties', icon: 'codicon-wrench' },
+    { id: 'gitChanges', label: 'Git Changes', icon: 'codicon-source-control' },
+  ];
+
   const bottomTabs: Array<{ id: BottomPanelId; label: string; icon: string }> = [
     { id: 'errorList', label: 'Error List', icon: 'codicon-error' },
     { id: 'output', label: 'Output', icon: 'codicon-output' },
     { id: 'terminal', label: 'Terminal', icon: 'codicon-terminal' },
     { id: 'testExplorer', label: 'Test Explorer', icon: 'codicon-beaker' },
     { id: 'findResults', label: 'Find Results', icon: 'codicon-search' },
+    { id: 'taskList', label: 'Task List', icon: 'codicon-checklist' },
     { id: 'locals', label: 'Locals', icon: 'codicon-symbol-variable' },
     { id: 'watch', label: 'Watch 1', icon: 'codicon-eye' },
     { id: 'callStack', label: 'Call Stack', icon: 'codicon-layers' },
     { id: 'breakpoints', label: 'Breakpoints', icon: 'codicon-debug-breakpoint' },
+    { id: 'immediate', label: 'Immediate', icon: 'codicon-terminal-cmd' },
   ];
+
+  const toggleLeftRailTab = (id: LeftPanelId) => {
+    if (store.leftOpen && store.leftPanel === id) {
+      store.setDock({ leftOpen: false });
+    } else {
+      store.setDock({ leftOpen: true, leftPanel: id });
+    }
+  };
+
+  const toggleRightRailTab = (id: RightPanelId) => {
+    if (store.rightOpen && store.rightPanel === id) {
+      store.setDock({ rightOpen: false });
+    } else {
+      store.setDock({ rightOpen: true, rightPanel: id });
+      if (id === 'gitChanges') void store.refreshGitStatus();
+    }
+  };
 
   return (
     <>
@@ -161,25 +199,110 @@ export const App: React.FC = () => {
 
           {/* Main Visual Studio Dock Area */}
           <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
-            {/* Left Dock (Solution Explorer) */}
+            {/* Visual Studio Left Auto-Hide Edge Rail */}
+            <div
+              style={{
+                width: 24,
+                background: 'var(--vs-bg-chrome)',
+                borderRight: '1px solid var(--vs-border)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                paddingTop: 4,
+                gap: 2,
+                flexShrink: 0,
+              }}
+            >
+              {leftTabs.map((t) => {
+                const active = store.leftOpen && store.leftPanel === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    title={t.label}
+                    onClick={() => toggleLeftRailTab(t.id)}
+                    style={{
+                      width: 22,
+                      padding: '8px 0',
+                      background: active ? 'var(--vs-bg-panel)' : 'transparent',
+                      border: 'none',
+                      borderLeft: active ? '2px solid var(--vs-accent)' : '2px solid transparent',
+                      color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 5,
+                    }}
+                  >
+                    <span className={`codicon ${t.icon}`} style={{ fontSize: 13 }} />
+                    <span style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', fontSize: 10.5 }}>
+                      {t.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Left Dock (Solution Explorer / Class View / Toolbox) */}
             {store.leftOpen && (
               <div
                 style={{
                   width: store.leftWidth,
-                  minWidth: 200,
+                  minWidth: 210,
                   maxWidth: 480,
                   borderRight: '1px solid var(--vs-border)',
                   display: 'flex',
                   flexDirection: 'column',
+                  background: 'var(--vs-bg-panel)',
                 }}
               >
                 <ToolWindowHeader
-                  title="Solution Explorer"
+                  title={leftTabs.find((t) => t.id === store.leftPanel)?.label || 'Solution Explorer'}
                   active
+                  pinned={store.leftPinned}
+                  onTogglePin={() =>
+                    store.setDock({
+                      leftPinned: !store.leftPinned,
+                      leftOpen: store.leftPinned ? false : true,
+                    })
+                  }
                   onClose={() => store.setDock({ leftOpen: false })}
                 />
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <SolutionExplorer />
+                  {store.leftPanel === 'solutionExplorer' && <SolutionExplorer />}
+                  {store.leftPanel === 'classView' && <ClassViewPanel />}
+                  {store.leftPanel === 'toolbox' && <ToolboxPanel />}
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    borderTop: '1px solid var(--vs-border)',
+                    height: 24,
+                    background: 'var(--vs-bg-panel)',
+                  }}
+                >
+                  {leftTabs.map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => store.setDock({ leftPanel: t.id })}
+                      style={{
+                        flex: 1,
+                        border: 'none',
+                        borderRight: '1px solid var(--vs-border-subtle)',
+                        borderBottom: store.leftPanel === t.id ? '2px solid var(--vs-accent)' : '2px solid transparent',
+                        cursor: 'pointer',
+                        background: store.leftPanel === t.id ? 'var(--vs-bg)' : 'transparent',
+                        color: store.leftPanel === t.id ? 'var(--vs-fg-bright)' : 'var(--vs-fg)',
+                        fontSize: 11,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        padding: '0 4px',
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
                 </div>
               </div>
             )}
@@ -190,7 +313,7 @@ export const App: React.FC = () => {
                 <CodeEditorPane />
               </div>
 
-              {store.bottomOpen && (
+              {store.bottomOpen ? (
                 <div
                   style={{
                     height: store.bottomHeight,
@@ -204,6 +327,13 @@ export const App: React.FC = () => {
                   <ToolWindowHeader
                     title={bottomTabs.find((t) => t.id === store.bottomPanel)?.label || 'Output'}
                     active={false}
+                    pinned={store.bottomPinned}
+                    onTogglePin={() =>
+                      store.setDock({
+                        bottomPinned: !store.bottomPinned,
+                        bottomOpen: store.bottomPinned ? false : true,
+                      })
+                    }
                     onClose={() => store.setDock({ bottomOpen: false })}
                   />
                   <div style={{ flex: 1, minHeight: 0 }}>
@@ -212,6 +342,8 @@ export const App: React.FC = () => {
                     {store.bottomPanel === 'terminal' && <TerminalPanel />}
                     {store.bottomPanel === 'testExplorer' && <TestExplorerPanel />}
                     {store.bottomPanel === 'findResults' && <FindResultsPanel />}
+                    {store.bottomPanel === 'taskList' && <TaskListPanel />}
+                    {store.bottomPanel === 'immediate' && <ImmediateWindowPanel />}
                     {(store.bottomPanel === 'locals' ||
                       store.bottomPanel === 'watch' ||
                       store.bottomPanel === 'callStack' ||
@@ -259,6 +391,43 @@ export const App: React.FC = () => {
                     })}
                   </div>
                 </div>
+              ) : (
+                /* Bottom Auto-Hide Restore Bar */
+                <div
+                  style={{
+                    height: 22,
+                    background: 'var(--vs-bg-chrome)',
+                    borderTop: '1px solid var(--vs-border)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 2,
+                    padding: '0 4px',
+                    overflowX: 'auto',
+                  }}
+                >
+                  {bottomTabs.slice(0, 6).map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => store.setDock({ bottomOpen: true, bottomPanel: t.id })}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        padding: '0 8px',
+                        height: '100%',
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--vs-fg-muted)',
+                        cursor: 'pointer',
+                        fontSize: 11,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      <span className={`codicon ${t.icon}`} style={{ fontSize: 11 }} />
+                      <span>{t.label}</span>
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
 
@@ -278,6 +447,13 @@ export const App: React.FC = () => {
                 <ToolWindowHeader
                   title={store.rightPanel === 'gitChanges' ? 'Git Changes' : 'Properties'}
                   active={false}
+                  pinned={store.rightPinned}
+                  onTogglePin={() =>
+                    store.setDock({
+                      rightPinned: !store.rightPinned,
+                      rightOpen: store.rightPinned ? false : true,
+                    })
+                  }
                   onClose={() => store.setDock({ rightOpen: false })}
                 />
                 <div style={{ flex: 1, minHeight: 0 }}>
@@ -296,6 +472,7 @@ export const App: React.FC = () => {
                     style={{
                       flex: 1,
                       border: 'none',
+                      borderBottom: store.rightPanel === 'properties' ? '2px solid var(--vs-accent)' : '2px solid transparent',
                       cursor: 'pointer',
                       background: store.rightPanel === 'properties' ? 'var(--vs-bg)' : 'transparent',
                       color: 'var(--vs-fg)',
@@ -312,6 +489,7 @@ export const App: React.FC = () => {
                     style={{
                       flex: 1,
                       border: 'none',
+                      borderBottom: store.rightPanel === 'gitChanges' ? '2px solid var(--vs-accent)' : '2px solid transparent',
                       cursor: 'pointer',
                       background: store.rightPanel === 'gitChanges' ? 'var(--vs-bg)' : 'transparent',
                       color: 'var(--vs-fg)',
@@ -323,6 +501,50 @@ export const App: React.FC = () => {
                 </div>
               </div>
             )}
+
+            {/* Visual Studio Right Auto-Hide Edge Rail */}
+            <div
+              style={{
+                width: 24,
+                background: 'var(--vs-bg-chrome)',
+                borderLeft: '1px solid var(--vs-border)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                paddingTop: 4,
+                gap: 2,
+                flexShrink: 0,
+              }}
+            >
+              {rightTabs.map((t) => {
+                const active = store.rightOpen && store.rightPanel === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    title={t.label}
+                    onClick={() => toggleRightRailTab(t.id)}
+                    style={{
+                      width: 22,
+                      padding: '8px 0',
+                      background: active ? 'var(--vs-bg-panel)' : 'transparent',
+                      border: 'none',
+                      borderRight: active ? '2px solid var(--vs-accent)' : '2px solid transparent',
+                      color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 5,
+                    }}
+                  >
+                    <span className={`codicon ${t.icon}`} style={{ fontSize: 13 }} />
+                    <span style={{ writingMode: 'vertical-rl', fontSize: 10.5 }}>
+                      {t.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <StatusBar />
@@ -345,8 +567,10 @@ export const App: React.FC = () => {
 const ToolWindowHeader: React.FC<{
   title: string;
   active: boolean;
+  pinned: boolean;
+  onTogglePin: () => void;
   onClose: () => void;
-}> = ({ title, active, onClose }) => (
+}> = ({ title, active, pinned, onTogglePin, onClose }) => (
   <div
     style={{
       height: 22,
@@ -356,25 +580,42 @@ const ToolWindowHeader: React.FC<{
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '0 8px',
+      padding: '0 6px 0 8px',
       fontSize: 11.5,
       fontWeight: 500,
     }}
   >
     <span>{title}</span>
-    <button
-      onClick={onClose}
-      title="Hide"
-      style={{
-        background: 'none',
-        border: 'none',
-        cursor: 'pointer',
-        color: 'inherit',
-        display: 'inline-flex',
-      }}
-    >
-      <span className="codicon codicon-close" style={{ fontSize: 12 }} />
-    </button>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+      <button
+        onClick={onTogglePin}
+        title={pinned ? 'Auto Hide' : 'Dock / Pin'}
+        style={{
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          color: 'inherit',
+          display: 'inline-flex',
+          padding: 1,
+        }}
+      >
+        <span className={`codicon ${pinned ? 'codicon-pinned' : 'codicon-pin'}`} style={{ fontSize: 12 }} />
+      </button>
+      <button
+        onClick={onClose}
+        title="Hide"
+        style={{
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          color: 'inherit',
+          display: 'inline-flex',
+          padding: 1,
+        }}
+      >
+        <span className="codicon codicon-close" style={{ fontSize: 12 }} />
+      </button>
+    </div>
   </div>
 );
 

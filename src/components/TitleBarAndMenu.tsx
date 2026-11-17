@@ -109,6 +109,14 @@ export const TitleBarAndMenu: React.FC = () => {
         action: () => store.setDock({ leftOpen: true, leftPanel: 'solutionExplorer' }),
       },
       {
+        label: 'Class View',
+        action: () => store.setDock({ leftOpen: true, leftPanel: 'classView' }),
+      },
+      {
+        label: 'Toolbox',
+        action: () => store.setDock({ leftOpen: true, leftPanel: 'toolbox' }),
+      },
+      {
         label: 'Git Changes',
         action: () => store.setDock({ rightOpen: true, rightPanel: 'gitChanges' }),
       },
@@ -133,6 +141,14 @@ export const TitleBarAndMenu: React.FC = () => {
       {
         label: 'Test Explorer',
         action: () => store.setDock({ bottomOpen: true, bottomPanel: 'testExplorer' }),
+      },
+      {
+        label: 'Task List',
+        action: () => store.setDock({ bottomOpen: true, bottomPanel: 'taskList' }),
+      },
+      {
+        label: 'Immediate Window',
+        action: () => store.setDock({ bottomOpen: true, bottomPanel: 'immediate' }),
       },
     ],
     Git: [
@@ -277,6 +293,68 @@ export const TitleBarAndMenu: React.FC = () => {
         label: 'Options...',
         shortcut: shortcuts.options,
         action: () => store.setDialog({ toolsOptionsOpen: true }),
+      },
+    ],
+    Window: [
+      {
+        label: 'New Vertical Tab Group',
+        disabled: store.openTabs.length === 0,
+        action: () => store.setSplitMode('vertical'),
+      },
+      {
+        label: 'New Horizontal Tab Group',
+        disabled: store.openTabs.length === 0,
+        action: () => store.setSplitMode('horizontal'),
+      },
+      {
+        label: 'Merge All Tab Groups',
+        disabled: store.splitMode === 'none',
+        action: () => store.setSplitMode('none'),
+      },
+      { separator: true },
+      {
+        label: `${store.tabLayout === 'top' ? '✓ ' : ''}Tab Layout -> Top`,
+        action: () => store.setTabLayout('top'),
+      },
+      {
+        label: `${store.tabLayout === 'left' ? '✓ ' : ''}Tab Layout -> Left (Vertical Tabs)`,
+        action: () => store.setTabLayout('left'),
+      },
+      {
+        label: `${store.tabLayout === 'right' ? '✓ ' : ''}Tab Layout -> Right (Vertical Tabs)`,
+        action: () => store.setTabLayout('right'),
+      },
+      {
+        label: `${store.colorizeTabsByProject ? '✓ ' : ''}Colorize Document Tabs by Project`,
+        action: () => store.setColorizeTabsByProject(!store.colorizeTabsByProject),
+      },
+      { separator: true },
+      {
+        label: activeTab?.isPinned ? 'Unpin Active Tab' : 'Pin Active Tab',
+        disabled: !activeTab,
+        action: () => activeTab && store.togglePinTab(activeTab.id),
+      },
+      {
+        label: 'Close All Documents',
+        disabled: store.openTabs.length === 0,
+        action: () => store.closeAllTabs(),
+      },
+      {
+        label: 'Reset Window Layout',
+        action: () => {
+          store.setSplitMode('none');
+          store.setTabLayout('top');
+          store.setDock({
+            leftOpen: true,
+            leftPinned: true,
+            leftPanel: 'solutionExplorer',
+            bottomOpen: true,
+            bottomPinned: true,
+            bottomPanel: 'errorList',
+            rightOpen: false,
+            rightPinned: true,
+          });
+        },
       },
     ],
     Help: [
