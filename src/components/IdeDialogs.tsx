@@ -262,6 +262,7 @@ export const QuickLaunchDialog: React.FC = () => {
     { label: 'Build: Clean Solution', action: () => void store.buildSolution('clean') },
     { label: 'Debug: Start Debugging', action: () => void store.startDebugging(true) },
     { label: 'Debug: Start Without Debugging', action: () => void store.startDebugging(false) },
+    { label: 'Debug: Open Debug Console Window', action: () => void window.vsApi?.console.open() },
     { label: 'Debug: Toggle Breakpoint (F9)', action: () => store.dispatchEditorCommand('toggleBreakpoint') },
     { label: 'Test: Run All Tests', action: () => void store.runTests() },
     { label: 'Tools: Manage NuGet Packages...', action: () => store.openNugetTab() },
@@ -334,6 +335,10 @@ export const ToolsOptionsDialog: React.FC = () => {
     setColorizeTabsByProject,
     editorZoom,
     setEditorZoom,
+    consoleLaunchMode,
+    setConsoleLaunchMode,
+    autoCloseConsole,
+    setAutoCloseConsole,
     envStatus,
     refreshEnvironment,
   } = useIdeStore();
@@ -385,6 +390,24 @@ export const ToolsOptionsDialog: React.FC = () => {
               type="checkbox"
               checked={colorizeTabsByProject}
               onChange={(e) => setColorizeTabsByProject(e.target.checked)}
+            />
+
+            <span>Console App Terminal:</span>
+            <select
+              className="vs-select"
+              value={consoleLaunchMode}
+              onChange={(e) => setConsoleLaunchMode(e.target.value as 'externalWindow' | 'integratedTerminal' | 'macTerminal')}
+            >
+              <option value="externalWindow">VS Debug Console Window (Visual Studio Default)</option>
+              <option value="integratedTerminal">Integrated Terminal (Bottom Dock)</option>
+              <option value="macTerminal">macOS Terminal.app</option>
+            </select>
+
+            <span>Auto-close console on exit:</span>
+            <input
+              type="checkbox"
+              checked={autoCloseConsole}
+              onChange={(e) => setAutoCloseConsole(e.target.checked)}
             />
 
             <span>Editor Font Size:</span>

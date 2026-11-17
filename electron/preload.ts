@@ -108,8 +108,8 @@ export const vsApi = {
   },
   debug: {
     start: (params: unknown) => ipcRenderer.invoke('debug:start', params),
-    startWithoutDebugging: (csproj: string, config: string) =>
-      ipcRenderer.invoke('debug:startWithoutDebugging', csproj, config),
+    startWithoutDebugging: (csproj: string, config: string, options?: unknown) =>
+      ipcRenderer.invoke('debug:startWithoutDebugging', csproj, config, options),
     stop: () => ipcRenderer.invoke('debug:stop'),
     continue: () => ipcRenderer.invoke('debug:continue'),
     stepOver: () => ipcRenderer.invoke('debug:stepOver'),
@@ -120,6 +120,11 @@ export const vsApi = {
     evaluate: (expr: string, frameId?: number) =>
       ipcRenderer.invoke('debug:evaluate', expr, frameId),
     sendInput: (text: string) => ipcRenderer.invoke('debug:sendInput', text),
+  },
+  console: {
+    open: () => ipcRenderer.invoke('console:open'),
+    close: () => ipcRenderer.invoke('console:close'),
+    getSnapshot: () => ipcRenderer.invoke('console:getSnapshot'),
   },
   terminal: {
     create: (id: string, cwd: string) => ipcRenderer.invoke('terminal:create', id, cwd),

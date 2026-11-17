@@ -132,6 +132,19 @@ export interface DebugStackFrame {
 }
 
 export type DebugState = 'stopped' | 'running' | 'paused' | 'building';
+export type ConsoleLaunchMode = 'externalWindow' | 'integratedTerminal' | 'macTerminal';
+
+export interface ConsoleSessionInfo {
+  sessionId: number;
+  projectName: string;
+  configuration: string;
+  targetFramework: string;
+  exePath: string;
+  command: string;
+  pid?: number;
+  running: boolean;
+  exitCode?: number | null;
+}
 
 export interface NuGetPackageSummary {
   id: string;

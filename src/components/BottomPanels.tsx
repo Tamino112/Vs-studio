@@ -238,6 +238,16 @@ export const OutputPanel: React.FC = () => {
         >
           <span className="codicon codicon-clear-all" /> Clear All
         </button>
+        {activeOutputChannel === 'Debug' && (
+          <button
+            className="vs-btn"
+            style={{ padding: '2px 8px', fontSize: 11 }}
+            onClick={() => void window.vsApi?.console.open()}
+            title="Open Microsoft Visual Studio Debug Console Window"
+          >
+            <span className="codicon codicon-terminal" /> Open Debug Console
+          </button>
+        )}
       </div>
 
       <div
@@ -298,16 +308,28 @@ export const OutputPanel: React.FC = () => {
 };
 
 export const TerminalPanel: React.FC = () => {
-  const { solution } = useIdeStore();
+  const { solution, pendingTerminalCommand, consumePendingTerminalCommand } = useIdeStore();
   const [termOutput, setTermOutput] = useState<string>('Initializing macOS Developer Terminal...\n');
   const [cmdInput, setCmdInput] = useState('');
   const termId = 'main-terminal';
   const outRef = useRef<HTMLDivElement>(null);
+  const terminalReadyRef = useRef(false);
+  const lastCmdIdRef = useRef<number>(0);
 
   useEffect(() => {
     if (!window.vsApi) return;
+    terminalReadyRef.current = false;
     const cwd = solution?.dir || '.';
-    void window.vsApi.terminal.create(termId, cwd);
+    void window.vsApi.terminal.create(termId, cwd).then(() => {
+      terminalReadyRef.current = true;
+      const pending = useIdeStore.getState().pendingTerminalCommand;
+      if (pending && pending.id !== lastCmdIdRef.current) {
+        lastCmdIdRef.current = pending.id;
+        setTermOutput((prev) => prev + `\n$ ${pending.command}\n`);
+        void window.vsApi.terminal.write(termId, `cd "${pending.cwd.replace(/"/g, '\\"')}" && ${pending.command}\n`);
+        useIdeStore.getState().consumePendingTerminalCommand();
+      }
+    });
     const unsubData = window.vsApi.on('terminal:data', (payload) => {
       const p = payload as { id: string; data: string };
       if (p.id === termId) {
@@ -315,10 +337,23 @@ export const TerminalPanel: React.FC = () => {
       }
     });
     return () => {
+      terminalReadyRef.current = false;
       unsubData();
       void window.vsApi.terminal.kill(termId);
     };
   }, [solution?.dir]);
+
+  useEffect(() => {
+    if (!pendingTerminalCommand || !terminalReadyRef.current) return;
+    if (pendingTerminalCommand.id === lastCmdIdRef.current) return;
+    lastCmdIdRef.current = pendingTerminalCommand.id;
+    setTermOutput((prev) => prev + `\n$ ${pendingTerminalCommand.command}\n`);
+    void window.vsApi.terminal.write(
+      termId,
+      `cd "${pendingTerminalCommand.cwd.replace(/"/g, '\\"')}" && ${pendingTerminalCommand.command}\n`,
+    );
+    consumePendingTerminalCommand();
+  }, [pendingTerminalCommand, consumePendingTerminalCommand]);
 
   useEffect(() => {
     if (outRef.current) outRef.current.scrollTop = outRef.current.scrollHeight;
@@ -355,9 +390,10 @@ export const TerminalPanel: React.FC = () => {
           className="vs-input mono"
           value={cmdInput}
           onChange={(e) => setCmdInput(e.target.value)}
-          placeholder="Type command (e.g. dotnet --info, dotnet build, git status)..."
+          placeholder="Type command or program stdin (e.g. dotnet --info, dotnet build, git status)..."
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
+              setTermOutput((prev) => prev + cmdInput + '\n');
               void window.vsApi.terminal.write(termId, cmdInput + '\n');
               setCmdInput('');
             } else if (e.key === 'c' && e.ctrlKey) {

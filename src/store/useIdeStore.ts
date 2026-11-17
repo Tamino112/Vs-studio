@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import {
   BottomPanelId,
   Breakpoint,
+  ConsoleLaunchMode,
   DebugStackFrame,
   DebugState,
   DebugVariable,
@@ -140,6 +141,9 @@ export interface IdeState {
   tabLayout: TabLayoutPosition;
   colorizeTabsByProject: boolean;
   editorZoom: number;
+  consoleLaunchMode: ConsoleLaunchMode;
+  autoCloseConsole: boolean;
+  pendingTerminalCommand: { id: number; command: string; cwd: string } | null;
 
   envStatus: EnvironmentStatus | null;
   templates: DotnetTemplate[];
@@ -224,6 +228,9 @@ export interface IdeState {
   setTabLayout: (layout: TabLayoutPosition) => void;
   setColorizeTabsByProject: (enabled: boolean) => void;
   setEditorZoom: (zoom: number) => void;
+  setConsoleLaunchMode: (mode: ConsoleLaunchMode) => void;
+  setAutoCloseConsole: (enabled: boolean) => void;
+  consumePendingTerminalCommand: () => void;
   setScreen: (screen: 'start' | 'ide') => void;
 
   openSolution: (targetPath: string) => Promise<void>;
@@ -316,6 +323,8 @@ const savedTheme = (localStorage.getItem('vs.theme') as VsThemeId) || 'dark';
 const savedKeymap = (localStorage.getItem('vs.keymap') as KeymapMode) || 'macos';
 const savedTabLayout = (localStorage.getItem('vs.tabLayout') as TabLayoutPosition) || 'top';
 const savedColorize = localStorage.getItem('vs.colorizeTabs') !== 'false';
+const savedConsoleMode = (localStorage.getItem('vs.consoleMode') as ConsoleLaunchMode) || 'externalWindow';
+const savedAutoCloseConsole = localStorage.getItem('vs.autoCloseConsole') === 'true';
 applyThemeToDom(savedTheme);
 
 export const useIdeStore = create<IdeState>((set, get) => ({
@@ -329,6 +338,9 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   tabLayout: savedTabLayout,
   colorizeTabsByProject: savedColorize,
   editorZoom: 100,
+  consoleLaunchMode: savedConsoleMode,
+  autoCloseConsole: savedAutoCloseConsole,
+  pendingTerminalCommand: null,
 
   envStatus: null,
   templates: [],
@@ -450,6 +462,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     set({ colorizeTabsByProject });
   },
   setEditorZoom: (editorZoom) => set({ editorZoom: Math.max(50, Math.min(200, editorZoom)) }),
+  setConsoleLaunchMode: (consoleLaunchMode) => {
+    localStorage.setItem('vs.consoleMode', consoleLaunchMode);
+    set({ consoleLaunchMode });
+  },
+  setAutoCloseConsole: (autoCloseConsole) => {
+    localStorage.setItem('vs.autoCloseConsole', String(autoCloseConsole));
+    set({ autoCloseConsole });
+  },
+  consumePendingTerminalCommand: () => set({ pendingTerminalCommand: null }),
   setScreen: (screen) => set({ screen }),
 
   openSolution: async (targetPath) => {
@@ -1180,6 +1201,31 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     const ok = await get().buildSolution('build', startup.path);
     if (!ok) return;
 
+    const cfg = get().activeConfiguration;
+    const consoleMode = get().consoleLaunchMode;
+    const isExeProject = startup.outputType.toLowerCase() === 'exe' || startup.outputType.toLowerCase() === 'winexe';
+    const hasNetcoredbg = Boolean(get().envStatus?.netcoredbgPath);
+    const useIntegratedTerminal =
+      isExeProject &&
+      consoleMode === 'integratedTerminal' &&
+      (!withDebugger || !hasNetcoredbg);
+
+    if (useIntegratedTerminal) {
+      const cmd = `dotnet run --project "${startup.path}" -c ${cfg} --no-build`;
+      set({
+        bottomOpen: true,
+        bottomPanel: 'terminal',
+        debugState: 'stopped',
+        statusText: `Running ${startup.name} in Terminal...`,
+        pendingTerminalCommand: {
+          id: Date.now() + Math.random(),
+          command: cmd,
+          cwd: startup.dir,
+        },
+      });
+      return;
+    }
+
     set({
       bottomOpen: true,
       bottomPanel: 'output',
@@ -1188,17 +1234,27 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       statusText: withDebugger ? `Debugging ${startup.name}...` : `Running ${startup.name}...`,
     });
 
+    // Like Visual Studio on Windows, automatically open the Debug Console Terminal window for Console / Exe projects
+    if (isExeProject && consoleMode === 'externalWindow') {
+      await window.vsApi.console.open();
+    }
+
     if (withDebugger) {
       await window.vsApi.debug.start({
         csprojPath: startup.path,
         projectName: startup.name,
         targetFramework: startup.targetFramework,
-        configuration: get().activeConfiguration,
+        configuration: cfg,
         netcoredbgPath: get().envStatus?.netcoredbgPath || null,
         breakpoints: get().breakpoints,
+        consoleMode,
       });
     } else {
-      await window.vsApi.debug.startWithoutDebugging(startup.path, get().activeConfiguration);
+      await window.vsApi.debug.startWithoutDebugging(startup.path, cfg, {
+        projectName: startup.name,
+        targetFramework: startup.targetFramework,
+        consoleMode,
+      });
     }
   },
 

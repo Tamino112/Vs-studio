@@ -1,6 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import { getAugmentedEnv, getDotnetBin } from './dotnetService';
 
 export interface DebugVariable {
@@ -25,11 +26,29 @@ export interface BreakpointSpec {
   condition?: string;
 }
 
+export interface ConsoleSessionMeta {
+  projectName: string;
+  configuration: string;
+  targetFramework: string;
+  exePath: string;
+  command: string;
+  pid?: number;
+}
+
+export interface ConsoleExitInfo {
+  code: number;
+  pid?: number;
+  exePath: string;
+}
+
 export interface DebugCallbacks {
   onOutput: (line: string) => void;
   onStateChange: (state: 'stopped' | 'running' | 'paused') => void;
   onStopped: (data: { file?: string; line?: number; frames: DebugStackFrame[]; locals: DebugVariable[] }) => void;
   onExited: (exitCode: number) => void;
+  onConsoleStart?: (meta: ConsoleSessionMeta) => void;
+  onConsoleData?: (chunk: string) => void;
+  onConsoleExit?: (info: ConsoleExitInfo) => void;
 }
 
 export class DotnetDebugManager {
@@ -40,43 +59,165 @@ export class DotnetDebugManager {
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private currentThreadId = 1;
   private callbacks: DebugCallbacks | null = null;
+  private currentExePath = '';
+  private currentPid: number | undefined = undefined;
+  private consoleExitedEmitted = false;
+  private lineRemainder = '';
 
   setCallbacks(cb: DebugCallbacks): void {
     this.callbacks = cb;
   }
 
-  async startWithoutDebugging(csprojPath: string, configuration: string): Promise<void> {
+  private emitRawConsoleAndOutput(chunk: string): void {
+    if (!chunk) return;
+    this.callbacks?.onConsoleData?.(chunk);
+
+    const combined = this.lineRemainder + chunk;
+    const parts = combined.split(/\r?\n/);
+    this.lineRemainder = parts.pop() ?? '';
+    for (const line of parts) {
+      if (line.length > 0) this.callbacks?.onOutput(line);
+    }
+  }
+
+  private flushLineRemainder(): void {
+    if (this.lineRemainder.trim().length > 0) {
+      this.callbacks?.onOutput(this.lineRemainder);
+    }
+    this.lineRemainder = '';
+  }
+
+  async launchInMacTerminal(params: {
+    csprojPath: string;
+    projectName?: string;
+    targetFramework?: string;
+    configuration: string;
+  }): Promise<void> {
+    const dotnetBin = await getDotnetBin();
+    const cwd = path.dirname(params.csprojPath);
+    const projName = params.projectName || path.basename(params.csprojPath, '.csproj');
+    const tfm = params.targetFramework || 'net10.0';
+    const dllPath = path.join(cwd, 'bin', params.configuration, tfm, `${projName}.dll`);
+    const scriptPath = path.join(os.tmpdir(), `vs-console-${Date.now()}.command`);
+
+    const env = getAugmentedEnv();
+    const dotnetRootExport = env.DOTNET_ROOT ? `export DOTNET_ROOT="${env.DOTNET_ROOT}"\n` : '';
+    const cmdLine = fsSync.existsSync(dllPath)
+      ? `"${dotnetBin}" "${dllPath}"`
+      : `"${dotnetBin}" run --project "${params.csprojPath}" -c "${params.configuration}" --no-build`;
+
+    const scriptContent = [
+      '#!/bin/zsh',
+      `cd "${cwd.replace(/"/g, '\\"')}"`,
+      `export PATH="${(env.PATH || '').replace(/"/g, '\\"')}"`,
+      dotnetRootExport + 'export DOTNET_CLI_TELEMETRY_OPTOUT=1',
+      'export DOTNET_NOLOGO=1',
+      `printf "\\033]0;Microsoft Visual Studio Debug Console — ${projName}\\007"`,
+      cmdLine,
+      'EXIT_CODE=$?',
+      'echo ""',
+      `echo "${dllPath.replace(/"/g, '\\"')} (process $$) exited with code $EXIT_CODE."`,
+      'echo "Press any key to close this window . . ."',
+      'read -k 1 -s',
+      `rm -f "${scriptPath}"`,
+      'exit $EXIT_CODE',
+      '',
+    ].join('\n');
+
+    fsSync.writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
+    this.callbacks?.onOutput(`[Run] Launching macOS Terminal.app for ${projName}...`);
+    const opener = spawn('open', ['-a', 'Terminal', scriptPath], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    opener.unref();
+  }
+
+  async startWithoutDebugging(
+    csprojPath: string,
+    configuration: string,
+    options?: {
+      projectName?: string;
+      targetFramework?: string;
+      consoleMode?: 'externalWindow' | 'integratedTerminal' | 'macTerminal';
+    },
+  ): Promise<void> {
     await this.stop();
+    const projName = options?.projectName || path.basename(csprojPath, '.csproj');
+    const tfm = options?.targetFramework || 'net10.0';
+    const cwd = path.dirname(csprojPath);
+    const dllPath = path.join(cwd, 'bin', configuration, tfm, `${projName}.dll`);
+
+    if (options?.consoleMode === 'macTerminal' && process.platform === 'darwin') {
+      await this.launchInMacTerminal({
+        csprojPath,
+        projectName: projName,
+        targetFramework: tfm,
+        configuration,
+      });
+      this.callbacks?.onStateChange('stopped');
+      return;
+    }
+
     const env = getAugmentedEnv();
     const dotnetBin = await getDotnetBin();
-    const cwd = path.dirname(csprojPath);
+    const useCompiledDll = fsSync.existsSync(dllPath);
+    const cmdArgs = useCompiledDll
+      ? [dllPath]
+      : ['run', '--project', csprojPath, '-c', configuration, '--no-build'];
+    const displayCmd = `${dotnetBin} ${cmdArgs.join(' ')}`;
 
+    this.currentExePath = dllPath;
+    this.consoleExitedEmitted = false;
+    this.lineRemainder = '';
     this.callbacks?.onStateChange('running');
-    this.callbacks?.onOutput(`[Run] dotnet run --project "${csprojPath}" -c ${configuration}`);
+    this.callbacks?.onOutput(`[Run] ${displayCmd}`);
 
-    this.runProc = spawn(dotnetBin, ['run', '--project', csprojPath, '-c', configuration, '--no-build'], {
+    this.runProc = spawn(dotnetBin, cmdArgs, {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.currentPid = this.runProc.pid;
+
+    this.callbacks?.onConsoleStart?.({
+      projectName: projName,
+      configuration,
+      targetFramework: tfm,
+      exePath: dllPath,
+      command: displayCmd,
+      pid: this.runProc.pid,
+    });
 
     const handle = (buf: Buffer) => {
-      for (const line of buf.toString('utf-8').split(/\r?\n/)) {
-        if (line.length > 0) this.callbacks?.onOutput(line);
-      }
+      this.emitRawConsoleAndOutput(buf.toString('utf-8'));
     };
     this.runProc.stdout.on('data', handle);
     this.runProc.stderr.on('data', handle);
     this.runProc.on('close', (code) => {
+      const exitCode = code ?? 0;
+      const pid = this.currentPid;
       this.runProc = null;
+      this.flushLineRemainder();
       this.callbacks?.onStateChange('stopped');
-      this.callbacks?.onOutput(`[Process exited with code ${code ?? 0}]`);
-      this.callbacks?.onExited(code ?? 0);
+      this.callbacks?.onOutput(`[Process exited with code ${exitCode}]`);
+      if (!this.consoleExitedEmitted) {
+        this.consoleExitedEmitted = true;
+        this.callbacks?.onConsoleExit?.({ code: exitCode, pid, exePath: this.currentExePath });
+      }
+      this.callbacks?.onExited(exitCode);
     });
     this.runProc.on('error', (err) => {
+      const pid = this.currentPid;
+      const errMsg = `[Run error: ${err.message}]\n`;
+      this.callbacks?.onConsoleData?.(errMsg);
       this.callbacks?.onOutput(`[Run error: ${err.message}]`);
       this.runProc = null;
       this.callbacks?.onStateChange('stopped');
+      if (!this.consoleExitedEmitted) {
+        this.consoleExitedEmitted = true;
+        this.callbacks?.onConsoleExit?.({ code: 1, pid, exePath: this.currentExePath });
+      }
       this.callbacks?.onExited(1);
     });
   }
@@ -88,12 +229,17 @@ export class DotnetDebugManager {
     configuration: string;
     netcoredbgPath: string | null;
     breakpoints: BreakpointSpec[];
+    consoleMode?: 'externalWindow' | 'integratedTerminal' | 'macTerminal';
   }): Promise<{ mode: 'dap' | 'run' }> {
     if (!params.netcoredbgPath) {
       this.callbacks?.onOutput(
         '[Debugger] netcoredbg not found on macOS PATH. Running without debugger (install via `brew install netcoredbg` for breakpoints & stepping).',
       );
-      await this.startWithoutDebugging(params.csprojPath, params.configuration);
+      await this.startWithoutDebugging(params.csprojPath, params.configuration, {
+        projectName: params.projectName,
+        targetFramework: params.targetFramework,
+        consoleMode: params.consoleMode,
+      });
       return { mode: 'run' };
     }
 
@@ -109,10 +255,17 @@ export class DotnetDebugManager {
 
     if (!fsSync.existsSync(dllPath)) {
       this.callbacks?.onOutput(`[Debugger] Assembly not found at ${dllPath}; falling back to dotnet run.`);
-      await this.startWithoutDebugging(params.csprojPath, params.configuration);
+      await this.startWithoutDebugging(params.csprojPath, params.configuration, {
+        projectName: params.projectName,
+        targetFramework: params.targetFramework,
+        consoleMode: params.consoleMode,
+      });
       return { mode: 'run' };
     }
 
+    this.currentExePath = dllPath;
+    this.consoleExitedEmitted = false;
+    this.lineRemainder = '';
     this.callbacks?.onStateChange('running');
     this.callbacks?.onOutput(`[Debugger] Launching netcoredbg for ${dllPath}`);
 
@@ -121,6 +274,16 @@ export class DotnetDebugManager {
       env: getAugmentedEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.currentPid = this.dapProc.pid;
+
+    this.callbacks?.onConsoleStart?.({
+      projectName: params.projectName,
+      configuration: params.configuration,
+      targetFramework: params.targetFramework,
+      exePath: dllPath,
+      command: dllPath,
+      pid: this.dapProc.pid,
+    });
 
     this.dapProc.stdout.on('data', (chunk: Buffer) => this.handleDapData(chunk));
     this.dapProc.stderr.on('data', (chunk: Buffer) => {
@@ -128,9 +291,16 @@ export class DotnetDebugManager {
       if (t) this.callbacks?.onOutput(`[netcoredbg] ${t}`);
     });
     this.dapProc.on('close', (code) => {
+      const exitCode = code ?? 0;
+      const pid = this.currentPid;
       this.dapProc = null;
+      this.flushLineRemainder();
       this.callbacks?.onStateChange('stopped');
-      this.callbacks?.onExited(code ?? 0);
+      if (!this.consoleExitedEmitted) {
+        this.consoleExitedEmitted = true;
+        this.callbacks?.onConsoleExit?.({ code: exitCode, pid, exePath: this.currentExePath });
+      }
+      this.callbacks?.onExited(exitCode);
     });
 
     await this.sendDapRequest('initialize', {
@@ -139,16 +309,30 @@ export class DotnetDebugManager {
       linesStartAt1: true,
       columnsStartAt1: true,
       pathFormat: 'path',
+      supportsRunInTerminalRequest: true,
     });
 
-    await this.sendDapRequest('launch', {
-      name: params.projectName,
-      type: 'coreclr',
-      request: 'launch',
-      program: dllPath,
-      cwd: projDir,
-      stopAtEntry: false,
-    });
+    try {
+      await this.sendDapRequest('launch', {
+        name: params.projectName,
+        type: 'coreclr',
+        request: 'launch',
+        program: dllPath,
+        cwd: projDir,
+        stopAtEntry: false,
+        console: 'integratedTerminal',
+      });
+    } catch {
+      // Fallback if this netcoredbg build prefers internalConsole
+      await this.sendDapRequest('launch', {
+        name: params.projectName,
+        type: 'coreclr',
+        request: 'launch',
+        program: dllPath,
+        cwd: projDir,
+        stopAtEntry: false,
+      });
+    }
 
     await this.syncBreakpoints(params.breakpoints);
     await this.sendDapRequest('configurationDone', {});
@@ -244,6 +428,22 @@ export class DotnetDebugManager {
     this.callbacks?.onStateChange('stopped');
   }
 
+  private sendDapResponse(requestSeq: number, command: string, success: boolean, body: unknown, message?: string): void {
+    if (!this.dapProc) return;
+    const seq = this.seq++;
+    const payload = JSON.stringify({
+      seq,
+      type: 'response',
+      request_seq: requestSeq,
+      success,
+      command,
+      body,
+      ...(message ? { message } : {}),
+    });
+    const header = `Content-Length: ${Buffer.byteLength(payload, 'utf-8')}\r\n\r\n`;
+    this.dapProc.stdin.write(header + payload, 'utf-8');
+  }
+
   private sendDapRequest(command: string, args: unknown): Promise<unknown> {
     if (!this.dapProc) return Promise.reject(new Error('No DAP process'));
     const seq = this.seq++;
@@ -253,6 +453,38 @@ export class DotnetDebugManager {
     return new Promise((resolve, reject) => {
       this.pending.set(seq, { resolve, reject });
     });
+  }
+
+  private handleDapReverseRequest(seq: number, command: string, args: Record<string, unknown>): void {
+    if (command === 'runInTerminal') {
+      const cmdArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+      if (cmdArgs.length === 0) {
+        this.sendDapResponse(seq, command, false, {}, 'Missing command args');
+        return;
+      }
+      const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : path.dirname(this.currentExePath || process.cwd());
+      const customEnv = (typeof args.env === 'object' && args.env ? args.env : {}) as Record<string, string | null>;
+      const mergedEnv: NodeJS.ProcessEnv = { ...getAugmentedEnv() };
+      for (const [k, v] of Object.entries(customEnv)) {
+        if (v === null) delete mergedEnv[k];
+        else mergedEnv[k] = String(v);
+      }
+      const proc = spawn(cmdArgs[0], cmdArgs.slice(1), {
+        cwd,
+        env: mergedEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      this.runProc = proc;
+      this.currentPid = proc.pid;
+      proc.stdout.on('data', (chunk: Buffer) => this.emitRawConsoleAndOutput(chunk.toString('utf-8')));
+      proc.stderr.on('data', (chunk: Buffer) => this.emitRawConsoleAndOutput(chunk.toString('utf-8')));
+      proc.on('close', () => {
+        if (this.runProc === proc) this.runProc = null;
+      });
+      this.sendDapResponse(seq, command, true, { processId: proc.pid });
+      return;
+    }
+    this.sendDapResponse(seq, command, false, {}, `Unsupported reverse request: ${command}`);
   }
 
   private handleDapData(chunk: Buffer): void {
@@ -274,7 +506,10 @@ export class DotnetDebugManager {
 
       try {
         const msg = JSON.parse(bodyStr) as {
-          type: 'response' | 'event';
+          type: 'response' | 'event' | 'request';
+          seq?: number;
+          command?: string;
+          arguments?: Record<string, unknown>;
           request_seq?: number;
           success?: boolean;
           message?: string;
@@ -282,7 +517,9 @@ export class DotnetDebugManager {
           event?: string;
         };
 
-        if (msg.type === 'response' && msg.request_seq !== undefined) {
+        if (msg.type === 'request' && msg.seq !== undefined && msg.command) {
+          this.handleDapReverseRequest(msg.seq, msg.command, msg.arguments || {});
+        } else if (msg.type === 'response' && msg.request_seq !== undefined) {
           const p = this.pending.get(msg.request_seq);
           if (p) {
             this.pending.delete(msg.request_seq);
@@ -290,7 +527,7 @@ export class DotnetDebugManager {
             else p.reject(new Error(msg.message || 'DAP request failed'));
           }
         } else if (msg.type === 'event') {
-          this.handleDapEvent(msg.event || '', msg.body || {});
+          void this.handleDapEvent(msg.event || '', msg.body || {});
         }
       } catch {
         // ignore
@@ -300,8 +537,15 @@ export class DotnetDebugManager {
 
   private async handleDapEvent(event: string, body: Record<string, unknown>): Promise<void> {
     if (event === 'output') {
-      const out = String(body.output || '').replace(/\r?\n$/, '');
-      if (out) this.callbacks?.onOutput(out);
+      const rawOut = String(body.output || '');
+      const category = String(body.category || 'console');
+      if (rawOut) {
+        if (category === 'stdout' || category === 'stderr' || category === 'console') {
+          this.callbacks?.onConsoleData?.(rawOut);
+        }
+        const trimmed = rawOut.replace(/\r?\n$/, '');
+        if (trimmed) this.callbacks?.onOutput(trimmed);
+      }
     } else if (event === 'stopped') {
       this.currentThreadId = Number(body.threadId || 1);
       this.callbacks?.onStateChange('paused');
@@ -350,8 +594,17 @@ export class DotnetDebugManager {
         this.callbacks?.onStopped({ frames: [], locals: [] });
       }
     } else if (event === 'terminated' || event === 'exited') {
+      const exitCode = Number(body.exitCode ?? 0);
       this.callbacks?.onStateChange('stopped');
-      this.callbacks?.onExited(Number(body.exitCode ?? 0));
+      if (!this.consoleExitedEmitted) {
+        this.consoleExitedEmitted = true;
+        this.callbacks?.onConsoleExit?.({
+          code: exitCode,
+          pid: this.currentPid,
+          exePath: this.currentExePath,
+        });
+      }
+      this.callbacks?.onExited(exitCode);
     }
   }
 }

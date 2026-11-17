@@ -295,6 +295,10 @@ export const TitleBarAndMenu: React.FC = () => {
         label: 'Windows -> Breakpoints',
         action: () => store.setDock({ bottomOpen: true, bottomPanel: 'breakpoints' }),
       },
+      {
+        label: 'Windows -> Debug Console Window',
+        action: () => void window.vsApi?.console.open(),
+      },
     ],
     Test: [
       {

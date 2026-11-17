@@ -237,3 +237,18 @@ textarea {
   background: var(--vs-bg-selection);
   color: #ffffff;
 }
+
+@keyframes vs-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.vs-console-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background: #e4e4e7;
+  vertical-align: text-bottom;
+  margin-left: 1px;
+  animation: vs-blink 1.05s step-end infinite;
+}

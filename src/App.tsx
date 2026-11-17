@@ -27,9 +27,22 @@ import {
   QuickLaunchDialog,
   ToolsOptionsDialog,
 } from './components/IdeDialogs';
+import { DebugConsoleWindow } from './components/DebugConsoleWindow';
 import { BottomPanelId, DiagnosticItem, LeftPanelId, OutputChannelName, RightPanelId } from './types/ide';
 
+const isDebugConsoleView =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('view') === 'debug-console';
+
 export const App: React.FC = () => {
+  if (isDebugConsoleView) {
+    return <DebugConsoleWindow />;
+  }
+
+  return <MainIdeApp />;
+};
+
+const MainIdeApp: React.FC = () => {
   const store = useIdeStore();
 
   useEffect(() => {

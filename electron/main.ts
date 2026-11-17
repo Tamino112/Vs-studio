@@ -53,6 +53,26 @@ import { DotnetDebugManager } from './services/debugService';
 import { TerminalManager } from './services/terminalService';
 
 let mainWindow: BrowserWindow | null = null;
+let debugConsoleWindow: BrowserWindow | null = null;
+let consoleSessionCounter = 0;
+let currentConsoleSnapshot: {
+  session: {
+    sessionId: number;
+    projectName: string;
+    configuration: string;
+    targetFramework: string;
+    exePath: string;
+    command: string;
+    pid?: number;
+    running: boolean;
+    exitCode?: number | null;
+  } | null;
+  output: string;
+} = {
+  session: null,
+  output: '',
+};
+
 const lspClient = new CSharpLspClient();
 const debugManager = new DotnetDebugManager();
 const terminalManager = new TerminalManager();
@@ -61,6 +81,56 @@ function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+function sendToDebugConsole(channel: string, payload: unknown): void {
+  if (debugConsoleWindow && !debugConsoleWindow.isDestroyed()) {
+    debugConsoleWindow.webContents.send(channel, payload);
+  }
+}
+
+function openOrFocusDebugConsoleWindow(): void {
+  if (debugConsoleWindow && !debugConsoleWindow.isDestroyed()) {
+    if (debugConsoleWindow.isMinimized()) debugConsoleWindow.restore();
+    debugConsoleWindow.show();
+    debugConsoleWindow.focus();
+    return;
+  }
+
+  const isMac = process.platform === 'darwin';
+  debugConsoleWindow = new BrowserWindow({
+    width: 920,
+    height: 540,
+    minWidth: 520,
+    minHeight: 300,
+    backgroundColor: '#0C0C0C',
+    title: 'Microsoft Visual Studio Debug Console',
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac ? { trafficLightPosition: { x: 10, y: 10 } } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  const devUrl = process.env.VITE_DEV_SERVER_URL || (!app.isPackaged ? 'http://localhost:5173' : '');
+  if (devUrl && !app.isPackaged) {
+    const sep = devUrl.includes('?') ? '&' : '?';
+    debugConsoleWindow.loadURL(`${devUrl}${sep}view=debug-console`).catch(() => {
+      debugConsoleWindow?.loadFile(path.join(__dirname, '../dist/index.html'), {
+        query: { view: 'debug-console' },
+      });
+    });
+  } else {
+    debugConsoleWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
+      query: { view: 'debug-console' },
+    });
+  }
+
+  debugConsoleWindow.on('closed', () => {
+    debugConsoleWindow = null;
+  });
 }
 
 function createWindow(): void {
@@ -92,6 +162,9 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    if (debugConsoleWindow && !debugConsoleWindow.isDestroyed()) {
+      debugConsoleWindow.close();
+    }
   });
 }
 
@@ -413,10 +486,40 @@ function registerIpc(): void {
     onStateChange: (state) => sendToRenderer('debug:state', state),
     onStopped: (data) => sendToRenderer('debug:stopped', data),
     onExited: (exitCode) => sendToRenderer('debug:exited', exitCode),
+    onConsoleStart: (meta) => {
+      consoleSessionCounter += 1;
+      const session = {
+        sessionId: consoleSessionCounter,
+        ...meta,
+        running: true,
+        exitCode: null,
+      };
+      currentConsoleSnapshot = { session, output: '' };
+      sendToDebugConsole('console:session', session);
+      sendToRenderer('console:session', session);
+    },
+    onConsoleData: (chunk) => {
+      currentConsoleSnapshot.output = (currentConsoleSnapshot.output + chunk).slice(-100000);
+      sendToDebugConsole('console:data', chunk);
+      sendToRenderer('console:data', chunk);
+    },
+    onConsoleExit: (info) => {
+      if (currentConsoleSnapshot.session) {
+        currentConsoleSnapshot.session = {
+          ...currentConsoleSnapshot.session,
+          running: false,
+          exitCode: info.code,
+          pid: info.pid ?? currentConsoleSnapshot.session.pid,
+          exePath: info.exePath || currentConsoleSnapshot.session.exePath,
+        };
+      }
+      sendToDebugConsole('console:exit', info);
+      sendToRenderer('console:exit', info);
+    },
   });
   ipcMain.handle('debug:start', (_e, params) => debugManager.startDebugging(params));
-  ipcMain.handle('debug:startWithoutDebugging', (_e, csproj: string, config: string) =>
-    debugManager.startWithoutDebugging(csproj, config),
+  ipcMain.handle('debug:startWithoutDebugging', (_e, csproj: string, config: string, options) =>
+    debugManager.startWithoutDebugging(csproj, config, options),
   );
   ipcMain.handle('debug:stop', () => debugManager.stop());
   ipcMain.handle('debug:continue', () => debugManager.continue());
@@ -428,7 +531,21 @@ function registerIpc(): void {
   ipcMain.handle('debug:evaluate', (_e, expr: string, frameId?: number) =>
     debugManager.evaluate(expr, frameId),
   );
-  ipcMain.handle('debug:sendInput', (_e, text: string) => debugManager.sendInput(text));
+  ipcMain.handle('debug:sendInput', (_e, text: string) => {
+    currentConsoleSnapshot.output = (currentConsoleSnapshot.output + text).slice(-100000);
+    debugManager.sendInput(text);
+  });
+
+  // Visual Studio Debug Console Window
+  ipcMain.handle('console:open', () => {
+    openOrFocusDebugConsoleWindow();
+  });
+  ipcMain.handle('console:close', () => {
+    if (debugConsoleWindow && !debugConsoleWindow.isDestroyed()) {
+      debugConsoleWindow.close();
+    }
+  });
+  ipcMain.handle('console:getSnapshot', () => currentConsoleSnapshot);
 
   // Terminal
   ipcMain.handle('terminal:create', (_e, id: string, cwd: string) => {
