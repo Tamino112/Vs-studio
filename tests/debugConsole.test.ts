@@ -165,7 +165,7 @@ describe('Debug Console & Terminal Launch', () => {
       });
     });
 
-    expect(startMeta?.isPty).toBe(true);
+    expect(startMeta?.isPty).toBe(process.platform !== 'win32');
     expect(rawChunks.join('')).toContain('Hallo');
     expect(rawChunks.join('')).toContain('|KEY=K');
     expect(exitInfo?.code).toBe(7);

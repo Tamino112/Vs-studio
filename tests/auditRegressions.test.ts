@@ -57,7 +57,7 @@ describe('Audit regressions (backend parsing)', () => {
   });
 
   it('git status/stage work when the solution folder is a sub folder of the repository', async () => {
-    const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vs-git-sub-')));
+    const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'vs-git-sub-')));
     try {
       const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
       git('init', '-q');

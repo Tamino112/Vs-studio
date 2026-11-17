@@ -47,7 +47,7 @@ async function repoRoot(dir: string): Promise<string> {
     // git returns the realpath (/private/var/… on macOS); express it relative to the
     // path the IDE uses so file paths match open tabs exactly.
     try {
-      const realDir = fsSync.realpathSync(dir);
+      const realDir = fsSync.realpathSync.native(dir);
       const rel = path.relative(realDir, root);
       return path.resolve(dir, rel);
     } catch {
