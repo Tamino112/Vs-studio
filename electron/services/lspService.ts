@@ -125,6 +125,10 @@ export class CSharpLspClient {
   didChange(filePath: string, text: string): void {
     if (!this.isRunning()) return;
     const uri = pathToFileURL(filePath).toString();
+    if (!this.openVersions.has(uri)) {
+      this.didOpen(filePath, text);
+      return;
+    }
     const version = (this.openVersions.get(uri) ?? 1) + 1;
     this.openVersions.set(uri, version);
     this.sendNotification('textDocument/didChange', {
@@ -136,6 +140,9 @@ export class CSharpLspClient {
   didSave(filePath: string, text: string): void {
     if (!this.isRunning()) return;
     const uri = pathToFileURL(filePath).toString();
+    if (!this.openVersions.has(uri)) {
+      this.didOpen(filePath, text);
+    }
     this.sendNotification('textDocument/didSave', {
       textDocument: { uri },
       text,

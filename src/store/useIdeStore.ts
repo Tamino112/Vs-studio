@@ -293,10 +293,17 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     await get().refreshGitStatus();
     await get().refreshRecent();
 
-    // Start C# LSP if installed
+    // Start C# LSP if installed (await so initial didOpen is not dropped)
     const env = get().envStatus;
     if (env?.csharpLsInstalled && env.csharpLsPath) {
-      void window.vsApi.lsp.start(sln.dir, env.csharpLsPath);
+      const started = await window.vsApi.lsp.start(sln.dir, env.csharpLsPath);
+      if (started) {
+        for (const t of get().openTabs) {
+          if (t.kind === 'code' && t.language === 'csharp') {
+            void window.vsApi.lsp.didOpen(t.path, t.content);
+          }
+        }
+      }
     }
 
     // Auto-open Program.cs of startup project if present

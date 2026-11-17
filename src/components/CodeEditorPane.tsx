@@ -11,6 +11,11 @@ import { registerMonacoThemes } from '../themes/vsThemes';
 import { CSharpFileIcon, CSharpProjectIcon, NuGetIcon, VsLogoIcon } from './VsIcons';
 import { NuGetManagerTab } from './NuGetManagerTab';
 
+import {
+  getBuiltInCSharpCompletions,
+  mapLspCompletionKind,
+} from '../utils/csharpIntellisense';
+
 // Configure Monaco workers locally (offline safe for macOS .app)
 if (typeof self !== 'undefined' && !(self as unknown as { MonacoEnvironment?: unknown }).MonacoEnvironment) {
   (self as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
@@ -24,13 +29,25 @@ if (typeof self !== 'undefined' && !(self as unknown as { MonacoEnvironment?: un
   };
 }
 
+interface LspCompletionItem {
+  label: string;
+  kind?: number;
+  detail?: string;
+  documentation?: string | { value?: string };
+  insertText?: string;
+  insertTextFormat?: number;
+  filterText?: string;
+  sortText?: string;
+  textEdit?: { newText?: string };
+}
+
 let providersRegistered = false;
 function ensureCSharpProviders() {
   if (providersRegistered) return;
   providersRegistered = true;
   registerMonacoThemes(monaco);
 
-  // Built-in C# / .NET 10 snippets + LSP completion integration
+  // Combined Roslyn LSP + context-aware .NET 10 C# IntelliSense provider
   monaco.languages.registerCompletionItemProvider('csharp', {
     triggerCharacters: ['.', ' '],
     provideCompletionItems: async (model, position) => {
@@ -42,53 +59,12 @@ function ensureCSharpProviders() {
         endColumn: word.endColumn,
       };
 
-      const snippets: monaco.languages.CompletionItem[] = [
-        {
-          label: 'cw',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: 'Console.WriteLine(${1:value});',
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'Console.WriteLine snippet',
-          range,
-        },
-        {
-          label: 'prop',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: 'public ${1:int} ${2:MyProperty} { get; set; }',
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'Auto-implemented property',
-          range,
-        },
-        {
-          label: 'ctor',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: 'public ${1:ClassName}(${2})\n{\n    ${0}\n}',
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'Constructor',
-          range,
-        },
-        {
-          label: 'record',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: 'public record ${1:MyRecord}(${2:string Name});',
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'C# record declaration',
-          range,
-        },
-        {
-          label: 'async',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: 'public async Task<${1:string}> ${2:ExecuteAsync}(CancellationToken ct = default)\n{\n    ${0}\n}',
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'Async Task method',
-          range,
-        },
-      ];
+      const builtIn = getBuiltInCSharpCompletions(monaco, model, position);
 
       const state = useIdeStore.getState();
       const tab = state.openTabs.find((t) => t.id === state.activeTabId);
       if (!tab || tab.kind !== 'code' || !window.vsApi) {
-        return { suggestions: snippets };
+        return { suggestions: builtIn };
       }
 
       try {
@@ -96,19 +72,40 @@ function ensureCSharpProviders() {
           tab.path,
           position.lineNumber - 1,
           position.column - 1,
-        )) as { items?: Array<{ label: string; kind?: number; detail?: string; insertText?: string }> } | Array<{ label: string; kind?: number; detail?: string; insertText?: string }> | null;
+        )) as { items?: LspCompletionItem[] } | LspCompletionItem[] | null;
 
         const lspItems = Array.isArray(res) ? res : res?.items || [];
-        const mapped: monaco.languages.CompletionItem[] = lspItems.slice(0, 120).map((item) => ({
-          label: item.label,
-          kind: (item.kind as monaco.languages.CompletionItemKind) || monaco.languages.CompletionItemKind.Text,
-          detail: item.detail,
-          insertText: item.insertText || item.label,
-          range,
-        }));
-        return { suggestions: [...mapped, ...snippets] };
+        if (lspItems.length === 0) {
+          return { suggestions: builtIn };
+        }
+
+        const mapped: monaco.languages.CompletionItem[] = lspItems.slice(0, 150).map((item) => {
+          const insertText = item.textEdit?.newText || item.insertText || item.label;
+          const doc =
+            typeof item.documentation === 'string'
+              ? item.documentation
+              : item.documentation?.value;
+          return {
+            label: item.label,
+            kind: mapLspCompletionKind(monaco, item.kind),
+            detail: item.detail,
+            documentation: doc,
+            insertText,
+            insertTextRules:
+              item.insertTextFormat === 2
+                ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                : undefined,
+            filterText: item.filterText || item.label,
+            sortText: item.sortText,
+            range,
+          };
+        });
+
+        const seen = new Set(mapped.map((m) => String(m.label)));
+        const merged = [...mapped, ...builtIn.filter((b) => !seen.has(String(b.label)))];
+        return { suggestions: merged };
       } catch {
-        return { suggestions: snippets };
+        return { suggestions: builtIn };
       }
     },
   });

@@ -399,6 +399,17 @@ export const ToolsOptionsDialog: React.FC = () => {
                     setInstallingLsp(true);
                     await window.vsApi.env.installCsharpLs();
                     await refreshEnvironment();
+                    const { envStatus: updatedEnv, solution, openTabs } = useIdeStore.getState();
+                    if (solution && updatedEnv?.csharpLsInstalled && updatedEnv.csharpLsPath) {
+                      const ok = await window.vsApi.lsp.start(solution.dir, updatedEnv.csharpLsPath);
+                      if (ok) {
+                        for (const t of openTabs) {
+                          if (t.kind === 'code' && t.language === 'csharp') {
+                            void window.vsApi.lsp.didOpen(t.path, t.content);
+                          }
+                        }
+                      }
+                    }
                     setInstallingLsp(false);
                   }}
                 >
