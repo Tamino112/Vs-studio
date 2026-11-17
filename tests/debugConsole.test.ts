@@ -99,7 +99,9 @@ describe('Debug Console & Terminal Launch', () => {
     });
   });
 
-  it('provides a real PTY and delivers a single keypress without Enter (Console.ReadKey semantics) with exact exit code', async () => {
+  it.skipIf(process.platform === 'win32')(
+    'provides a real PTY and delivers a single keypress without Enter (Console.ReadKey semantics) with exact exit code',
+    async () => {
     const projDir = path.join(tmpDir, 'ReadKeyApp');
     const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');
     await fs.mkdir(outDir, { recursive: true });
