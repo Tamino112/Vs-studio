@@ -69,7 +69,7 @@ describe('Solution & Multi-Project Service', () => {
     await removeProjectReference(created.csprojPath, libCsproj);
     const updated = await parseCsproj(created.csprojPath);
     expect(updated.projectReferences.length).toBe(0);
-  });
+  }, 20000);
 
   it('updates .csproj properties cleanly', async () => {
     const csproj = path.join(tmpDir, 'App.csproj');

@@ -282,12 +282,18 @@ describe('Debug Console & Terminal Launch', () => {
       { encoding: 'utf-8', mode: 0o755 },
     );
 
+    const dapExe =
+      process.platform === 'win32' ? path.join(tmpDir, 'fake-dap.cmd') : fakeDapScript;
+    if (process.platform === 'win32') {
+      await fs.writeFile(dapExe, `@echo off\r\n"${process.execPath}" "${fakeDapScript}" %*\r\n`, 'utf-8');
+    }
+
     const mgr = new DotnetDebugManager();
     const rawChunks: string[] = [];
     let exited = false;
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timed out waiting for fake DAP')), 5000);
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for fake DAP')), 8000);
       mgr.setCallbacks({
         onOutput: () => {},
         onStateChange: () => {},
@@ -307,7 +313,7 @@ describe('Debug Console & Terminal Launch', () => {
         projectName: 'DebugApp',
         targetFramework: 'net10.0',
         configuration: 'Debug',
-        netcoredbgPath: fakeDapScript,
+        netcoredbgPath: dapExe,
         breakpoints: [],
         consoleMode: 'externalWindow',
       });

@@ -296,6 +296,14 @@ export class DotnetDebugManager {
       cwd: projDir,
       env: getAugmentedEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
+      shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(params.netcoredbgPath),
+    });
+    dap.on('error', (err) => {
+      if (this.dapProc === dap) {
+        this.dapProc = null;
+        this.callbacks?.onOutput(`[Debugger] Failed to launch netcoredbg: ${err.message}`);
+        this.callbacks?.onStateChange('stopped');
+      }
     });
     dap.stdin.on('error', () => {
       // ignore EPIPE if netcoredbg died
