@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { readDirectoryTree, searchInDirectory } from '../electron/services/fileService';
 import {
   checkoutGitBranch,
@@ -46,6 +47,8 @@ describe('FileService & GitService', () => {
   it('initializes git repo, stages, commits, diffs, and switches branches', async () => {
     await fs.writeFile(path.join(tmpDir, 'Program.cs'), 'Console.WriteLine(1);\n');
     await initGitRepo(tmpDir);
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: tmpDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: tmpDir, stdio: 'pipe' });
 
     const status1 = await getGitStatus(tmpDir);
     expect(status1.isRepo).toBe(true);

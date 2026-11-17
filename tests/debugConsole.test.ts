@@ -21,7 +21,7 @@ describe('Debug Console & Terminal Launch', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 100 });
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
