@@ -151,6 +151,8 @@ export const ClassViewPanel: React.FC = () => {
                     alignItems: 'center',
                     gap: 5,
                     padding: '3px 8px',
+                    margin: '0 4px',
+                    borderRadius: 5,
                     cursor: 'pointer',
                     fontWeight: 600,
                     color: 'var(--vs-fg-bright)',
@@ -185,9 +187,13 @@ export const ClassViewPanel: React.FC = () => {
                             display: 'flex',
                             alignItems: 'center',
                             gap: 5,
-                            padding: '3px 8px 3px 22px',
+                            padding: '3px 8px 3px 20px',
+                            margin: '0 4px',
+                            borderRadius: 5,
                             cursor: 'pointer',
                           }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--vs-bg-hover)')}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                         >
                           <span
                             className={`codicon ${tOpen ? 'codicon-chevron-down' : 'codicon-chevron-right'}`}
@@ -211,7 +217,9 @@ export const ClassViewPanel: React.FC = () => {
                                 display: 'flex',
                                 alignItems: 'center',
                                 gap: 6,
-                                padding: '2px 8px 2px 44px',
+                                padding: '2px 8px 2px 42px',
+                                margin: '0 4px',
+                                borderRadius: 5,
                                 cursor: 'pointer',
                                 color: 'var(--vs-fg)',
                               }}

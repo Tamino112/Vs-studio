@@ -1,15 +1,31 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useIdeStore } from '../store/useIdeStore';
+import { selectAllEffectiveDiagnostics, useIdeStore } from '../store/useIdeStore';
 import { OutputChannelName } from '../types/ide';
 
 export const ErrorListPanel: React.FC = () => {
-  const { buildDiagnostics, lspDiagnosticsByFile, openFile } = useIdeStore();
+  const {
+    buildDiagnostics,
+    lspDiagnosticsByFile,
+    liveDiagnosticsByFile,
+    lspHasPublished,
+    lspStaleByFile,
+    openTabs,
+    openFile,
+  } = useIdeStore();
   const [showErrors, setShowErrors] = useState(true);
   const [showWarnings, setShowWarnings] = useState(true);
   const [showMessages, setShowMessages] = useState(true);
   const [filter, setFilter] = useState('');
+  const [selectedDiagId, setSelectedDiagId] = useState<string | null>(null);
 
-  const all = [...buildDiagnostics, ...Object.values(lspDiagnosticsByFile).flat()];
+  const all = selectAllEffectiveDiagnostics({
+    buildDiagnostics,
+    lspDiagnosticsByFile,
+    liveDiagnosticsByFile,
+    lspHasPublished,
+    lspStaleByFile,
+    openTabs,
+  });
   const errCount = all.filter((d) => d.severity === 'error').length;
   const warnCount = all.filter((d) => d.severity === 'warning').length;
   const msgCount = all.filter((d) => d.severity === 'message').length;
@@ -35,8 +51,8 @@ export const ErrorListPanel: React.FC = () => {
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          padding: '4px 8px',
+          gap: 6,
+          padding: '5px 8px',
           borderBottom: '1px solid var(--vs-border-subtle)',
           background: 'var(--vs-bg-panel)',
         }}
@@ -46,21 +62,21 @@ export const ErrorListPanel: React.FC = () => {
           onClick={() => setShowErrors(!showErrors)}
           icon="codicon-error"
           color="var(--vs-error)"
-          label={`${errCount} Errors`}
+          label={`${errCount} Error${errCount === 1 ? '' : 's'}`}
         />
         <FilterToggle
           active={showWarnings}
           onClick={() => setShowWarnings(!showWarnings)}
           icon="codicon-warning"
           color="var(--vs-warning)"
-          label={`${warnCount} Warnings`}
+          label={`${warnCount} Warning${warnCount === 1 ? '' : 's'}`}
         />
         <FilterToggle
           active={showMessages}
           onClick={() => setShowMessages(!showMessages)}
           icon="codicon-info"
           color="var(--vs-info)"
-          label={`${msgCount} Messages`}
+          label={`${msgCount} Message${msgCount === 1 ? '' : 's'}`}
         />
         <div style={{ flex: 1 }} />
         <input
@@ -68,7 +84,7 @@ export const ErrorListPanel: React.FC = () => {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="Search Error List"
-          style={{ width: 210, height: 20, fontSize: 11 }}
+          style={{ width: 220, height: 22, fontSize: 11.5 }}
         />
       </div>
 
@@ -76,12 +92,12 @@ export const ErrorListPanel: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
           <thead>
             <tr style={{ background: 'var(--vs-bg-panel)', borderBottom: '1px solid var(--vs-border)', textAlign: 'left' }}>
-              <th style={{ padding: '4px 8px', width: 26 }} />
-              <th style={{ padding: '4px 8px', width: 70 }}>Code</th>
-              <th style={{ padding: '4px 8px' }}>Description</th>
-              <th style={{ padding: '4px 8px', width: 130 }}>Project</th>
-              <th style={{ padding: '4px 8px', width: 180 }}>File</th>
-              <th style={{ padding: '4px 8px', width: 55 }}>Line</th>
+              <th style={{ padding: '5px 8px', width: 28 }} />
+              <th style={{ padding: '5px 8px', width: 74, fontWeight: 600 }}>Code</th>
+              <th style={{ padding: '5px 8px', fontWeight: 600 }}>Description</th>
+              <th style={{ padding: '5px 8px', width: 130, fontWeight: 600 }}>Project</th>
+              <th style={{ padding: '5px 8px', width: 170, fontWeight: 600 }}>File</th>
+              <th style={{ padding: '5px 8px', width: 55, fontWeight: 600 }}>Line</th>
             </tr>
           </thead>
           <tbody>
@@ -92,40 +108,58 @@ export const ErrorListPanel: React.FC = () => {
                 </td>
               </tr>
             ) : (
-              visible.map((d) => (
-                <tr
-                  key={d.id}
-                  onDoubleClick={() => void openFile(d.file, d.line, d.column)}
-                  style={{ borderBottom: '1px solid var(--vs-border-subtle)', cursor: 'pointer' }}
-                >
-                  <td style={{ padding: '3px 8px' }}>
-                    <span
-                      className={`codicon ${
-                        d.severity === 'error'
-                          ? 'codicon-error'
-                          : d.severity === 'warning'
-                          ? 'codicon-warning'
-                          : 'codicon-info'
-                      }`}
-                      style={{
-                        color:
+              visible.map((d) => {
+                const isSelected = selectedDiagId === d.id;
+                return (
+                  <tr
+                    key={d.id}
+                    onClick={() => setSelectedDiagId(d.id)}
+                    onDoubleClick={() => void openFile(d.file, d.line, d.column)}
+                    style={{
+                      borderBottom: '1px solid var(--vs-border-subtle)',
+                      cursor: 'pointer',
+                      background: isSelected ? 'var(--vs-bg-selection)' : 'transparent',
+                      color: isSelected ? '#FFFFFF' : 'var(--vs-fg)',
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!isSelected) e.currentTarget.style.background = 'var(--vs-bg-hover)';
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!isSelected) e.currentTarget.style.background = 'transparent';
+                    }}
+                  >
+                    <td style={{ padding: '4px 8px' }}>
+                      <span
+                        className={`codicon ${
                           d.severity === 'error'
+                            ? 'codicon-error'
+                            : d.severity === 'warning'
+                            ? 'codicon-warning'
+                            : 'codicon-info'
+                        }`}
+                        style={{
+                          color: isSelected
+                            ? '#FFFFFF'
+                            : d.severity === 'error'
                             ? 'var(--vs-error)'
                             : d.severity === 'warning'
                             ? 'var(--vs-warning)'
                             : 'var(--vs-info)',
-                      }}
-                    />
-                  </td>
-                  <td style={{ padding: '3px 8px', fontWeight: 600 }}>{d.code}</td>
-                  <td style={{ padding: '3px 8px' }}>{d.description}</td>
-                  <td style={{ padding: '3px 8px', color: 'var(--vs-fg-muted)' }}>{d.project}</td>
-                  <td style={{ padding: '3px 8px', color: 'var(--vs-fg-muted)' }}>
-                    {d.file.split(/[/\\]/).pop()}
-                  </td>
-                  <td style={{ padding: '3px 8px' }}>{d.line}</td>
-                </tr>
-              ))
+                        }}
+                      />
+                    </td>
+                    <td style={{ padding: '4px 8px', fontWeight: 600 }}>{d.code}</td>
+                    <td style={{ padding: '4px 8px' }}>{d.description}</td>
+                    <td style={{ padding: '4px 8px', color: isSelected ? '#E4E4E7' : 'var(--vs-fg-muted)' }}>
+                      {d.project}
+                    </td>
+                    <td style={{ padding: '4px 8px', color: isSelected ? '#E4E4E7' : 'var(--vs-fg-muted)' }}>
+                      {d.file.split(/[/\\]/).pop()}
+                    </td>
+                    <td style={{ padding: '4px 8px' }}>{d.line}</td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -147,13 +181,14 @@ const FilterToggle: React.FC<{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 5,
-      padding: '2px 8px',
-      borderRadius: 2,
-      background: active ? 'var(--vs-bg-selection-inactive)' : 'transparent',
+      padding: '3px 9px',
+      borderRadius: 5,
+      background: active ? 'var(--vs-bg-input)' : 'transparent',
       border: `1px solid ${active ? 'var(--vs-border)' : 'transparent'}`,
       cursor: 'pointer',
       fontSize: 11.5,
       opacity: active ? 1 : 0.6,
+      transition: 'background 0.12s ease, opacity 0.12s ease',
     }}
   >
     <span className={`codicon ${icon}`} style={{ color, fontSize: 13 }} />

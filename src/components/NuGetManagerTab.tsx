@@ -214,6 +214,7 @@ export const NuGetManagerTab: React.FC<{ initialProjectId?: string }> = ({ initi
                     padding: 12,
                     background: 'var(--vs-bg-panel)',
                     border: '1px solid var(--vs-border)',
+                    borderRadius: 6,
                     display: 'flex',
                     alignItems: 'center',
                     gap: 10,
@@ -246,6 +247,7 @@ export const NuGetManagerTab: React.FC<{ initialProjectId?: string }> = ({ initi
                     style={{
                       padding: 8,
                       border: '1px solid var(--vs-accent)',
+                      borderRadius: 6,
                       background: 'var(--vs-bg-panel)',
                       fontSize: 12,
                     }}
@@ -282,6 +284,7 @@ export const NuGetManagerTab: React.FC<{ initialProjectId?: string }> = ({ initi
                     padding: '10px 14px',
                     background: 'var(--vs-bg-panel)',
                     border: '1px solid var(--vs-border)',
+                    borderRadius: 6,
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

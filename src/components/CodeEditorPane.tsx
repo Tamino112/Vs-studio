@@ -6,12 +6,20 @@ import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
 import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 
-import { useIdeStore } from '../store/useIdeStore';
+import { selectEffectiveDiagnosticsForFile, useIdeStore } from '../store/useIdeStore';
 import { OpenTab } from '../types/ide';
 import { registerMonacoThemes } from '../themes/vsThemes';
 import { CSharpFileIcon, CSharpProjectIcon, NuGetIcon, VsLogoIcon } from './VsIcons';
+import {
+  CSHARP_SEMANTIC_LEGEND,
+  encodeCSharpSemanticTokens,
+  getBuiltInCSharpCompletions,
+  getBuiltInCSharpHover,
+  getBuiltInCSharpSignatureHelp,
+  mapLspCompletionKind,
+} from '../utils/csharpIntellisense';
+import { getBuiltInCSharpCodeActions } from '../utils/csharpDiagnostics';
 import { NuGetManagerTab } from './NuGetManagerTab';
-import { getBuiltInCSharpCompletions, mapLspCompletionKind } from '../utils/csharpIntellisense';
 import { parseCSharpOutline } from '../utils/csharpOutline';
 
 // Configure Monaco workers locally (offline safe for macOS .app)
@@ -27,6 +35,11 @@ if (typeof self !== 'undefined' && !(self as unknown as { MonacoEnvironment?: un
   };
 }
 
+interface LspRange {
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+}
+
 interface LspCompletionItem {
   label: string;
   kind?: number;
@@ -36,10 +49,37 @@ interface LspCompletionItem {
   insertTextFormat?: number;
   filterText?: string;
   sortText?: string;
-  textEdit?: { newText?: string };
+  textEdit?: { newText?: string; range?: LspRange };
+  additionalTextEdits?: Array<{ newText?: string; range?: LspRange }>;
 }
 
-// Track active file path per Monaco model URI so split document groups resolve LSP correctly
+interface LspSignatureHelp {
+  signatures?: Array<{
+    label: string;
+    documentation?: string | { value?: string };
+    parameters?: Array<{
+      label: string | [number, number];
+      documentation?: string | { value?: string };
+    }>;
+  }>;
+  activeSignature?: number;
+  activeParameter?: number;
+}
+
+interface LspCodeAction {
+  title?: string;
+  kind?: string;
+  isPreferred?: boolean;
+  edit?: {
+    changes?: Record<string, Array<{ range: LspRange; newText: string }>>;
+    documentChanges?: Array<{
+      textDocument?: { uri?: string };
+      edits?: Array<{ range: LspRange; newText: string }>;
+    }>;
+  };
+}
+
+// Track active file path per Monaco model URI so split document groups & providers resolve LSP correctly
 const modelPathRegistry = new Map<string, string>();
 
 function getTabForModel(model: monaco.editor.ITextModel): OpenTab | undefined {
@@ -49,7 +89,38 @@ function getTabForModel(model: monaco.editor.ITextModel): OpenTab | undefined {
     const found = state.openTabs.find((t) => t.kind === 'code' && t.path === mappedPath);
     if (found) return found;
   }
+  if (model.uri.scheme === 'file') {
+    const foundByUri = state.openTabs.find((t) => t.kind === 'code' && t.path === model.uri.fsPath);
+    if (foundByUri) return foundByUri;
+  }
   return state.openTabs.find((t) => t.id === state.activeTabId);
+}
+
+function getOrCreateFileModel(filePath: string, content: string, language: string): monaco.editor.ITextModel {
+  const uri = monaco.Uri.file(filePath);
+  const key = uri.toString();
+  modelPathRegistry.set(key, filePath);
+  let model = monaco.editor.getModel(uri);
+  if (!model) {
+    model = monaco.editor.createModel(content, language, uri);
+  } else {
+    if (model.getLanguageId() !== language) {
+      monaco.editor.setModelLanguage(model, language);
+    }
+    if (model.getValue() !== content) {
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: content }], () => null);
+    }
+  }
+  return model;
+}
+
+function toMonacoRange(r: LspRange): monaco.IRange {
+  return {
+    startLineNumber: r.start.line + 1,
+    startColumn: r.start.character + 1,
+    endLineNumber: r.end.line + 1,
+    endColumn: r.end.character + 1,
+  };
 }
 
 let providersRegistered = false;
@@ -58,11 +129,32 @@ function ensureCSharpProviders() {
   providersRegistered = true;
   registerMonacoThemes(monaco);
 
+  // Cross-file Go To Definition navigation handler
+  monaco.editor.registerEditorOpener({
+    openCodeEditor: async (_source, resource, selectionOrPosition) => {
+      const targetPath = resource.fsPath || resource.path;
+      if (!targetPath) return false;
+      let line = 1;
+      let column = 1;
+      if (selectionOrPosition) {
+        if ('lineNumber' in selectionOrPosition) {
+          line = selectionOrPosition.lineNumber;
+          column = selectionOrPosition.column;
+        } else if ('startLineNumber' in selectionOrPosition) {
+          line = selectionOrPosition.startLineNumber;
+          column = selectionOrPosition.startColumn;
+        }
+      }
+      await useIdeStore.getState().openFile(targetPath, line, column);
+      return true;
+    },
+  });
+
   monaco.languages.registerCompletionItemProvider('csharp', {
-    triggerCharacters: ['.', ' '],
+    triggerCharacters: ['.', ' ', '{'],
     provideCompletionItems: async (model, position) => {
       const word = model.getWordUntilPosition(position);
-      const range = {
+      const range: monaco.IRange = {
         startLineNumber: position.lineNumber,
         endLineNumber: position.lineNumber,
         startColumn: word.startColumn,
@@ -87,12 +179,16 @@ function ensureCSharpProviders() {
           return { suggestions: builtIn };
         }
 
+        const builtInFixEdits = builtIn[0]?.additionalTextEdits;
         const mapped: monaco.languages.CompletionItem[] = lspItems.slice(0, 150).map((item) => {
           const insertText = item.textEdit?.newText || item.insertText || item.label;
           const doc =
             typeof item.documentation === 'string'
               ? item.documentation
               : item.documentation?.value;
+          const lspAdditional = item.additionalTextEdits
+            ?.filter((e) => e.range && e.newText !== undefined)
+            .map((e) => ({ range: toMonacoRange(e.range!), text: e.newText! }));
           return {
             label: item.label,
             kind: mapLspCompletionKind(monaco, item.kind),
@@ -105,7 +201,8 @@ function ensureCSharpProviders() {
                 : undefined,
             filterText: item.filterText || item.label,
             sortText: item.sortText,
-            range,
+            additionalTextEdits: lspAdditional?.length ? lspAdditional : builtInFixEdits,
+            range: item.textEdit?.range ? toMonacoRange(item.textEdit.range) : range,
           };
         });
 
@@ -121,25 +218,152 @@ function ensureCSharpProviders() {
   monaco.languages.registerHoverProvider('csharp', {
     provideHover: async (model, position) => {
       const tab = getTabForModel(model);
-      if (!tab || tab.kind !== 'code' || !window.vsApi) return null;
-      try {
-        const res = (await window.vsApi.lsp.hover(
-          tab.path,
-          position.lineNumber - 1,
-          position.column - 1,
-        )) as { contents?: { value?: string } | string | Array<{ value?: string } | string> } | null;
-        if (!res?.contents) return null;
-        const arr = Array.isArray(res.contents) ? res.contents : [res.contents];
-        const contents = arr
-          .map((c) => (typeof c === 'string' ? c : c.value || ''))
-          .filter(Boolean)
-          .map((value) => ({ value }));
-        return contents.length ? { contents } : null;
-      } catch {
-        return null;
+      if (tab && tab.kind === 'code' && window.vsApi) {
+        try {
+          const res = (await window.vsApi.lsp.hover(
+            tab.path,
+            position.lineNumber - 1,
+            position.column - 1,
+          )) as { contents?: { value?: string } | string | Array<{ value?: string } | string> } | null;
+          if (res?.contents) {
+            const arr = Array.isArray(res.contents) ? res.contents : [res.contents];
+            const contents = arr
+              .map((c) => (typeof c === 'string' ? c : c.value || ''))
+              .filter(Boolean)
+              .map((value) => ({ value }));
+            if (contents.length) return { contents };
+          }
+        } catch {
+          // Fall back to built-in C# hover below
+        }
       }
+      return getBuiltInCSharpHover(model, position);
     },
   });
+
+  monaco.languages.registerSignatureHelpProvider('csharp', {
+    signatureHelpTriggerCharacters: ['(', ','],
+    signatureHelpRetriggerCharacters: [','],
+    provideSignatureHelp: async (model, position) => {
+      const tab = getTabForModel(model);
+      if (tab && tab.kind === 'code' && window.vsApi) {
+        try {
+          const res = (await window.vsApi.lsp.signatureHelp(
+            tab.path,
+            position.lineNumber - 1,
+            position.column - 1,
+          )) as LspSignatureHelp | null;
+          if (res?.signatures?.length) {
+            const sigHelp: monaco.languages.SignatureHelp = {
+              signatures: res.signatures.map((s) => ({
+                label: s.label,
+                documentation: typeof s.documentation === 'string' ? s.documentation : s.documentation?.value,
+                parameters: (s.parameters || []).map((p) => ({
+                  label: p.label,
+                  documentation: typeof p.documentation === 'string' ? p.documentation : p.documentation?.value,
+                })),
+              })),
+              activeSignature: res.activeSignature ?? 0,
+              activeParameter: res.activeParameter ?? 0,
+            };
+            return { value: sigHelp, dispose: () => {} };
+          }
+        } catch {
+          // Fall back cleanly
+        }
+      }
+      const builtIn = getBuiltInCSharpSignatureHelp(model, position);
+      return builtIn ? { value: builtIn, dispose: () => {} } : null;
+    },
+  });
+
+  monaco.languages.registerCodeActionProvider(
+    'csharp',
+    {
+      provideCodeActions: async (model, range, context) => {
+        const allModelMarkers = monaco.editor.getModelMarkers({ resource: model.uri });
+        const lineMarkers = allModelMarkers.filter(
+          (mk) =>
+            mk.startLineNumber <= range.endLineNumber &&
+            mk.endLineNumber >= range.startLineNumber,
+        );
+        const combinedMarkers: monaco.editor.IMarkerData[] = [];
+        const seenMarkerKeys = new Set<string>();
+        for (const mk of [...context.markers, ...lineMarkers]) {
+          const k = `${mk.startLineNumber}:${mk.startColumn}:${mk.message}`;
+          if (!seenMarkerKeys.has(k)) {
+            seenMarkerKeys.add(k);
+            combinedMarkers.push(mk);
+          }
+        }
+
+        const actions: monaco.languages.CodeAction[] = getBuiltInCSharpCodeActions(
+          monaco,
+          model,
+          combinedMarkers,
+        );
+
+        const tab = getTabForModel(model);
+        if (tab && tab.kind === 'code' && window.vsApi) {
+          try {
+            const lspActions = (await window.vsApi.lsp.codeAction(
+              tab.path,
+              range.startLineNumber - 1,
+              range.startColumn - 1,
+              range.endLineNumber - 1,
+              range.endColumn - 1,
+              [],
+            )) as LspCodeAction[] | null;
+
+            if (Array.isArray(lspActions)) {
+              for (const act of lspActions) {
+                if (!act.title || !act.edit) continue;
+                const edits: monaco.languages.IWorkspaceTextEdit[] = [];
+                if (act.edit.changes) {
+                  for (const [uriStr, textEdits] of Object.entries(act.edit.changes)) {
+                    const targetUri = monaco.Uri.parse(uriStr);
+                    for (const te of textEdits) {
+                      edits.push({
+                        resource: targetUri,
+                        textEdit: { range: toMonacoRange(te.range), text: te.newText },
+                        versionId: undefined,
+                      });
+                    }
+                  }
+                }
+                if (act.edit.documentChanges) {
+                  for (const dc of act.edit.documentChanges) {
+                    if (!dc.textDocument?.uri || !dc.edits) continue;
+                    const targetUri = monaco.Uri.parse(dc.textDocument.uri);
+                    for (const te of dc.edits) {
+                      edits.push({
+                        resource: targetUri,
+                        textEdit: { range: toMonacoRange(te.range), text: te.newText },
+                        versionId: undefined,
+                      });
+                    }
+                  }
+                }
+                if (edits.length > 0 && !actions.some((a) => a.title === act.title)) {
+                  actions.push({
+                    title: act.title,
+                    kind: act.kind || 'quickfix',
+                    isPreferred: act.isPreferred,
+                    edit: { edits },
+                  });
+                }
+              }
+            }
+          } catch {
+            // Keep built-in actions if LSP fails
+          }
+        }
+
+        return { actions, dispose: () => {} };
+      },
+    },
+    { providedCodeActionKinds: ['quickfix'] },
+  );
 
   monaco.languages.registerDefinitionProvider('csharp', {
     provideDefinition: async (model, position) => {
@@ -150,31 +374,68 @@ function ensureCSharpProviders() {
           tab.path,
           position.lineNumber - 1,
           position.column - 1,
-        )) as
-          | Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }>
-          | { uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }
-          | null;
+        )) as Array<{ uri: string; range: LspRange }> | { uri: string; range: LspRange } | null;
         const locs = Array.isArray(res) ? res : res ? [res] : [];
         return locs.map((l) => ({
           uri: monaco.Uri.parse(l.uri),
-          range: new monaco.Range(
-            l.range.start.line + 1,
-            l.range.start.character + 1,
-            l.range.end.line + 1,
-            l.range.end.character + 1,
-          ),
+          range: toMonacoRange(l.range),
         }));
       } catch {
         return null;
       }
     },
   });
+
+  monaco.languages.registerReferenceProvider('csharp', {
+    provideReferences: async (model, position) => {
+      const tab = getTabForModel(model);
+      if (!tab || tab.kind !== 'code' || !window.vsApi) return null;
+      try {
+        const res = (await window.vsApi.lsp.references(
+          tab.path,
+          position.lineNumber - 1,
+          position.column - 1,
+        )) as Array<{ uri: string; range: LspRange }> | null;
+        if (!Array.isArray(res)) return null;
+        return res.map((l) => ({
+          uri: monaco.Uri.parse(l.uri),
+          range: toMonacoRange(l.range),
+        }));
+      } catch {
+        return null;
+      }
+    },
+  });
+
+  monaco.languages.registerDocumentSemanticTokensProvider('csharp', {
+    getLegend: () => CSHARP_SEMANTIC_LEGEND,
+    provideDocumentSemanticTokens: (model) => {
+      return {
+        data: encodeCSharpSemanticTokens(model.getValue()),
+      };
+    },
+    releaseDocumentSemanticTokens: () => {},
+  });
 }
 
 const ZOOM_LEVELS = [50, 70, 85, 100, 115, 125, 150, 175, 200];
 
 export const CodeEditorPane: React.FC = () => {
-  const { splitMode } = useIdeStore();
+  const { splitMode, openTabs } = useIdeStore();
+
+  // Dispose cached Monaco models once a file is closed across all document groups
+  useEffect(() => {
+    const openPaths = new Set(openTabs.filter((t) => t.kind === 'code').map((t) => t.path));
+    for (const [uriStr, filePath] of Array.from(modelPathRegistry.entries())) {
+      if (!openPaths.has(filePath)) {
+        const model = monaco.editor.getModel(monaco.Uri.parse(uriStr));
+        if (model && !model.isAttachedToEditor()) {
+          model.dispose();
+          modelPathRegistry.delete(uriStr);
+        }
+      }
+    }
+  }, [openTabs]);
 
   return (
     <div
@@ -197,8 +458,8 @@ export const CodeEditorPane: React.FC = () => {
             minWidth: 0,
             minHeight: 0,
             display: 'flex',
-            borderLeft: splitMode === 'vertical' ? '2px solid var(--vs-border)' : undefined,
-            borderTop: splitMode === 'horizontal' ? '2px solid var(--vs-border)' : undefined,
+            borderLeft: splitMode === 'vertical' ? '1px solid var(--vs-border)' : undefined,
+            borderTop: splitMode === 'horizontal' ? '1px solid var(--vs-border)' : undefined,
           }}
         >
           <DocumentGroupPane groupId={1} />
@@ -240,6 +501,10 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     setSplitMode,
     updateTabContent,
     setTabCursor,
+    consumePendingReveal,
+    pendingReveal,
+    editorCommand,
+    recordNavigation,
     saveTab,
     theme,
     fontSize,
@@ -251,6 +516,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     debugPausedLocation,
     buildDiagnostics,
     lspDiagnosticsByFile,
+    liveDiagnosticsByFile,
+    lspHasPublished,
+    lspStaleByFile,
     pendingInsertSnippet,
   } = useIdeStore();
 
@@ -267,10 +535,13 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const diffEditorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
   const decorationsRef = useRef<string[]>([]);
+  const viewStatesRef = useRef<Map<string, monaco.editor.ICodeEditorViewState | null>>(new Map());
+  const prevModelUriRef = useRef<string | null>(null);
   const suppressChangeRef = useRef(false);
   const activeTabRef = useRef<OpenTab | null>(activeTab);
   activeTabRef.current = activeTab;
   const lastInsertedSnippetIdRef = useRef<number>(0);
+  const lastEditorCommandIdRef = useRef<number>(0);
 
   const [ctxMenu, setCtxMenu] = useState<TabContextMenuState | null>(null);
   const [activeFilesMenuOpen, setActiveFilesMenuOpen] = useState(false);
@@ -300,8 +571,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     if (!editorContainerRef.current) return;
 
     const editor = monaco.editor.create(editorContainerRef.current, {
-      value: '',
-      language: 'csharp',
+      model: null,
       theme: monacoThemeName,
       fontSize: effectiveFontSize,
       fontFamily: "'JetBrains Mono', 'SF Mono', Menlo, Monaco, Consolas, monospace",
@@ -313,8 +583,21 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       smoothScrolling: true,
       tabSize: 4,
       insertSpaces: true,
-      quickSuggestions: true,
+      quickSuggestions: { other: 'on', comments: 'off', strings: 'on' },
+      quickSuggestionsDelay: 40,
+      suggestOnTriggerCharacters: true,
+      acceptSuggestionOnCommitCharacter: true,
+      lightbulb: { enabled: monaco.editor.ShowLightbulbIconMode.On },
+      parameterHints: { enabled: true },
+      'semanticHighlighting.enabled': true,
+      bracketPairColorization: { enabled: true },
+      autoClosingBrackets: 'always',
+      autoClosingQuotes: 'always',
+      cursorBlinking: 'smooth',
+      cursorSmoothCaretAnimation: 'on',
+      renderLineHighlight: 'all',
       renderWhitespace: 'selection',
+      padding: { top: 6 },
     });
 
     editorRef.current = editor;
@@ -326,8 +609,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     editor.onDidChangeModelContent(() => {
       if (suppressChangeRef.current) return;
       const curTab = activeTabRef.current;
-      if (curTab) {
-        updateTabContent(curTab.id, editor.getValue());
+      const m = editor.getModel();
+      if (curTab && m) {
+        updateTabContent(curTab.id, m.getValue());
       }
     });
 
@@ -352,9 +636,46 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       if (curTab) void saveTab(curTab.id);
     });
 
+    editor.addCommand(monaco.KeyCode.F9, () => {
+      const curTab = activeTabRef.current;
+      const pos = editor.getPosition();
+      if (curTab && curTab.kind === 'code' && pos) {
+        toggleBreakpoint(curTab.path, pos.lineNumber);
+      }
+    });
+
+    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF, () => {
+      const curTab = activeTabRef.current;
+      if (!curTab || curTab.kind !== 'code') return;
+      if (curTab.language === 'csharp' && window.vsApi) {
+        void window.vsApi.lsp.format(curTab.path).then((edits) => {
+          const list = edits as Array<{ range?: LspRange; newText?: string }> | null;
+          const m = editor.getModel();
+          if (list?.length && m) {
+            editor.executeEdits(
+              'lsp-format',
+              list
+                .filter((ed) => ed.newText !== undefined)
+                .map((ed) => ({
+                  range: ed.range ? toMonacoRange(ed.range) : m.getFullModelRange(),
+                  text: ed.newText!,
+                })),
+            );
+          } else {
+            void editor.getAction('editor.action.formatDocument')?.run();
+          }
+        });
+      } else {
+        void editor.getAction('editor.action.formatDocument')?.run();
+      }
+    });
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => {
+      void editor.getAction('editor.action.commentLine')?.run();
+    });
+
     return () => {
-      const m = editor.getModel();
-      if (m) modelPathRegistry.delete(m.uri.toString());
+      editor.setModel(null);
       editor.dispose();
       editorRef.current = null;
     };
@@ -371,29 +692,112 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     });
   }, [monacoThemeName, effectiveFontSize, wordWrap, minimap]);
 
-  // Sync active code tab into Monaco model
+  // Swap per-file Monaco ITextModel ONLY when active tab identity/path changes (never on cursor/content change!)
   useEffect(() => {
     const editor = editorRef.current;
-    if (!editor || !activeTab || activeTab.kind !== 'code') return;
+    if (!editor) return;
+
+    if (prevModelUriRef.current) {
+      viewStatesRef.current.set(prevModelUriRef.current, editor.saveViewState());
+    }
+
+    if (!activeTab || activeTab.kind !== 'code') {
+      editor.setModel(null);
+      prevModelUriRef.current = null;
+      return;
+    }
 
     suppressChangeRef.current = true;
-    const model = editor.getModel();
-    if (model) {
-      modelPathRegistry.set(model.uri.toString(), activeTab.path);
-      monaco.editor.setModelLanguage(model, activeTab.language);
-      if (model.getValue() !== activeTab.content) {
-        model.setValue(activeTab.content);
+    const model = getOrCreateFileModel(activeTab.path, activeTab.content, activeTab.language);
+    const nextUri = model.uri.toString();
+    if (editor.getModel() !== model) {
+      editor.setModel(model);
+      const savedState = viewStatesRef.current.get(nextUri);
+      if (savedState) {
+        editor.restoreViewState(savedState);
+      } else if (activeTab.cursorLine) {
+        editor.revealLineInCenter(activeTab.cursorLine);
+        editor.setPosition({
+          lineNumber: activeTab.cursorLine,
+          column: activeTab.cursorColumn || 1,
+        });
       }
     }
-    if (activeTab.cursorLine) {
-      editor.revealLineInCenter(activeTab.cursorLine);
-      editor.setPosition({
-        lineNumber: activeTab.cursorLine,
-        column: activeTab.cursorColumn || 1,
-      });
-    }
+    prevModelUriRef.current = nextUri;
     suppressChangeRef.current = false;
-  }, [activeTab?.id, activeTab?.kind, activeTab?.cursorLine, activeTab?.cursorColumn]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab?.id, activeTab?.kind, activeTab?.path, activeTab?.language]);
+
+  // Explicit programmatic reveals (from Error List, Search Results, Breakpoints, Navigation History, Definition)
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!pendingReveal || !editor || !activeTab || activeTab.kind !== 'code') return;
+    if (pendingReveal.filePath !== activeTab.path) return;
+
+    editor.revealLineInCenter(pendingReveal.line);
+    editor.setPosition({
+      lineNumber: pendingReveal.line,
+      column: pendingReveal.column || 1,
+    });
+    editor.focus();
+    consumePendingReveal();
+  }, [pendingReveal, activeTab, consumePendingReveal]);
+
+  // Handle toolbar / Edit menu / global commands for the focused group
+  useEffect(() => {
+    if (!editorCommand || editorCommand.id === lastEditorCommandIdRef.current) return;
+    if (activeGroupId !== groupId) return;
+    const editor = editorRef.current;
+    if (!editor || activeTab?.kind !== 'code') return;
+
+    lastEditorCommandIdRef.current = editorCommand.id;
+    const cmd = editorCommand.command;
+
+    if (cmd === 'undo') {
+      editor.trigger('vs-toolbar', 'undo', null);
+      editor.focus();
+    } else if (cmd === 'redo') {
+      editor.trigger('vs-toolbar', 'redo', null);
+      editor.focus();
+    } else if (cmd === 'comment') {
+      void editor.getAction('editor.action.addCommentLine')?.run();
+      editor.focus();
+    } else if (cmd === 'uncomment') {
+      void editor.getAction('editor.action.removeCommentLine')?.run();
+      editor.focus();
+    } else if (cmd === 'find') {
+      void editor.getAction('actions.find')?.run();
+    } else if (cmd === 'replace') {
+      void editor.getAction('editor.action.startFindReplaceAction')?.run();
+    } else if (cmd === 'toggleBreakpoint') {
+      const ln = editor.getPosition()?.lineNumber || 1;
+      toggleBreakpoint(activeTab.path, ln);
+    } else if (cmd === 'format') {
+      if (activeTab.language === 'csharp' && window.vsApi) {
+        void window.vsApi.lsp.format(activeTab.path).then((edits) => {
+          const list = edits as Array<{ range?: LspRange; newText?: string }> | null;
+          const m = editor.getModel();
+          if (list?.length && m) {
+            editor.executeEdits(
+              'lsp-format',
+              list
+                .filter((ed) => ed.newText !== undefined)
+                .map((ed) => ({
+                  range: ed.range ? toMonacoRange(ed.range) : m.getFullModelRange(),
+                  text: ed.newText!,
+                })),
+            );
+          } else {
+            void editor.getAction('editor.action.formatDocument')?.run();
+          }
+          editor.focus();
+        });
+      } else {
+        void editor.getAction('editor.action.formatDocument')?.run();
+        editor.focus();
+      }
+    }
+  }, [editorCommand, activeGroupId, groupId, activeTab, toggleBreakpoint]);
 
   // Insert Toolbox snippets into the active group's editor
   useEffect(() => {
@@ -414,7 +818,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     editor.focus();
   }, [pendingInsertSnippet, activeGroupId, groupId, activeTab?.kind]);
 
-  // Sync Breakpoints + Current Debug Line + Diagnostics Markers
+  // Sync Breakpoints + Current Debug Line + Exact Live/LSP/Build Diagnostic Markers
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor || !activeTab || activeTab.kind !== 'code') return;
@@ -430,7 +834,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           isWholeLine: false,
           glyphMarginClassName: bp.enabled ? 'vs-breakpoint-glyph' : 'vs-breakpoint-disabled-glyph',
           glyphMarginHoverMessage: {
-            value: bp.enabled ? 'Breakpoint (Click to remove)' : 'Disabled Breakpoint',
+            value: bp.enabled ? 'Breakpoint (Click or press F9 to remove)' : 'Disabled Breakpoint',
           },
         },
       });
@@ -450,29 +854,66 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
 
     decorationsRef.current = editor.deltaDecorations(decorationsRef.current, decos);
 
-    const fileDiags = [
-      ...buildDiagnostics.filter((d) => d.file === activeTab.path),
-      ...(lspDiagnosticsByFile[activeTab.path] || []),
-    ];
+    const fileDiags = selectEffectiveDiagnosticsForFile(
+      {
+        buildDiagnostics,
+        lspDiagnosticsByFile,
+        liveDiagnosticsByFile,
+        lspHasPublished,
+        lspStaleByFile,
+      },
+      activeTab.path,
+    );
 
+    const lineCount = model.getLineCount();
     monaco.editor.setModelMarkers(
       model,
       'vs-studio',
-      fileDiags.map((d) => ({
-        startLineNumber: Math.max(1, d.line),
-        startColumn: Math.max(1, d.column),
-        endLineNumber: Math.max(1, d.line),
-        endColumn: Math.max(2, d.column + 12),
-        message: `[${d.code}] ${d.description}`,
-        severity:
-          d.severity === 'error'
-            ? monaco.MarkerSeverity.Error
-            : d.severity === 'warning'
-            ? monaco.MarkerSeverity.Warning
-            : monaco.MarkerSeverity.Info,
-      })),
+      fileDiags.map((d) => {
+        const startLine = Math.max(1, Math.min(d.line, lineCount));
+        const startLineMaxCol = model.getLineMaxColumn(startLine);
+        const startCol = Math.max(1, Math.min(d.column || 1, startLineMaxCol));
+        const endLine = Math.max(startLine, Math.min(d.endLine ?? startLine, lineCount));
+        let endCol = d.endColumn;
+        if (!endCol || (endLine === startLine && endCol <= startCol)) {
+          const wordAt = model.getWordAtPosition({ lineNumber: startLine, column: startCol });
+          endCol = wordAt && wordAt.endColumn > startCol ? wordAt.endColumn : startCol + 1;
+        }
+        const endLineMaxCol = model.getLineMaxColumn(endLine);
+        const clampedEndCol = Math.max(
+          startCol + (endLine === startLine ? 1 : 0),
+          Math.min(endCol, endLineMaxCol),
+        );
+
+        return {
+          startLineNumber: startLine,
+          startColumn: startCol,
+          endLineNumber: endLine,
+          endColumn: Math.max(startCol, Math.min(clampedEndCol, endLineMaxCol)),
+          message: `[${d.code}] ${d.description}`,
+          code: d.code,
+          source: d.source,
+          severity:
+            d.severity === 'error'
+              ? monaco.MarkerSeverity.Error
+              : d.severity === 'warning'
+              ? monaco.MarkerSeverity.Warning
+              : monaco.MarkerSeverity.Info,
+        };
+      }),
     );
-  }, [activeTab?.path, activeTab?.kind, breakpoints, debugPausedLocation, buildDiagnostics, lspDiagnosticsByFile]);
+  }, [
+    activeTab?.id,
+    activeTab?.path,
+    activeTab?.kind,
+    breakpoints,
+    debugPausedLocation,
+    buildDiagnostics,
+    lspDiagnosticsByFile,
+    liveDiagnosticsByFile,
+    lspHasPublished,
+    lspStaleByFile,
+  ]);
 
   // Diff editor support
   useEffect(() => {
@@ -529,7 +970,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   }, [activeOutlineType, cursorLine]);
 
   const jumpToLine = (line: number) => {
-    if (!editorRef.current) return;
+    if (!editorRef.current || !activeTab) return;
+    recordNavigation(activeTab.path, activeTab.cursorLine || 1, activeTab.cursorColumn || 1);
+    recordNavigation(activeTab.path, line, 1);
     editorRef.current.revealLineInCenter(line);
     editorRef.current.setPosition({ lineNumber: line, column: 1 });
     editorRef.current.focus();
@@ -580,13 +1023,18 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       ? 'var(--vs-accent)'
       : 'var(--vs-border)';
 
-    const topOrSideIndicator = isVerticalTabs
+    const tabBorderStyle: React.CSSProperties = isVerticalTabs
       ? {
           borderLeft: `3px solid ${isActive || (colorizeTabsByProject && tab.projectColor) ? accentColor : 'transparent'}`,
-          borderBottom: '1px solid var(--vs-border-subtle)',
+          borderRadius: 5,
+          margin: '1px 4px',
         }
       : {
-          borderRight: '1px solid var(--vs-border)',
+          borderRadius: '6px 6px 0 0',
+          marginTop: 3,
+          marginRight: 2,
+          border: isActive ? '1px solid var(--vs-border)' : '1px solid transparent',
+          borderBottom: isActive ? '1px solid var(--vs-bg-tab-active)' : 'none',
           borderTop: `2px solid ${
             tab.isPreview
               ? 'var(--vs-purple)'
@@ -599,6 +1047,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     return (
       <div
         key={tab.id}
+        className={`vs-doc-tab ${isActive ? 'is-active' : ''} ${tab.isPinned ? 'is-pinned' : ''} ${tab.isDirty ? 'is-dirty' : ''}`}
         draggable
         onDragStart={(e) => {
           e.dataTransfer.setData('application/x-vs-tab', tab.id);
@@ -630,9 +1079,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 5,
-          height: isVerticalTabs ? 26 : 27,
-          padding: isVerticalTabs ? '0 8px' : '0 8px 0 9px',
+          gap: 6,
+          height: isVerticalTabs ? 27 : 28,
+          padding: isVerticalTabs ? '0 8px' : '0 8px 0 10px',
           cursor: 'pointer',
           background:
             dragOverTabId === tab.id
@@ -640,12 +1089,13 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               : isActive
               ? 'var(--vs-bg-tab-active)'
               : 'var(--vs-bg-tab-inactive)',
-          color: isActive ? 'var(--vs-fg-bright)' : 'var(--vs-fg)',
+          color: isActive ? 'var(--vs-fg-tab-active, var(--vs-fg-bright))' : 'var(--vs-fg-tab-inactive, var(--vs-fg))',
           fontSize: 12,
           fontStyle: tab.isPreview ? 'italic' : 'normal',
           whiteSpace: 'nowrap',
           flexShrink: 0,
-          ...topOrSideIndicator,
+          transition: 'background 0.12s ease',
+          ...tabBorderStyle,
         }}
       >
         {colorizeTabsByProject && tab.projectColor && (
@@ -664,11 +1114,10 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           style={{
             overflow: 'hidden',
             textOverflow: 'ellipsis',
-            maxWidth: isVerticalTabs ? 120 : 180,
+            maxWidth: isVerticalTabs ? 120 : 185,
           }}
         >
           {tab.title}
-          {tab.isDirty ? '*' : ''}
         </span>
 
         {isVerticalTabs && <span style={{ flex: 1 }} />}
@@ -676,6 +1125,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         {/* Keep Open button on Preview Tabs */}
         {tab.isPreview && (
           <button
+            className="vs-tab-icon-btn"
             title="Keep Tab Open"
             onClick={(e) => {
               e.stopPropagation();
@@ -687,8 +1137,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           </button>
         )}
 
-        {/* Pin / Unpin button */}
+        {/* Pin / Unpin button (smooth reveal on hover via CSS) */}
         <button
+          className="vs-tab-pin-btn vs-tab-icon-btn"
           title={tab.isPinned ? 'Unpin Tab' : 'Pin Tab'}
           onClick={(e) => {
             e.stopPropagation();
@@ -696,15 +1147,15 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           }}
           style={{
             ...tabIconBtnStyle,
-            opacity: tab.isPinned ? 0.95 : 0.45,
-            color: tab.isPinned ? 'var(--vs-accent)' : 'inherit',
+            color: tab.isPinned ? 'var(--vs-accent-light, var(--vs-accent))' : 'inherit',
           }}
         >
           <span className={`codicon ${tab.isPinned ? 'codicon-pinned' : 'codicon-pin'}`} style={{ fontSize: 11 }} />
         </button>
 
-        {/* Close button */}
+        {/* Close / Dirty Dot button (Fluent dot -> close cross on hover) */}
         <button
+          className="vs-tab-close-btn vs-tab-icon-btn"
           title="Close (Middle-click)"
           onClick={(e) => {
             e.stopPropagation();
@@ -712,7 +1163,10 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           }}
           style={tabIconBtnStyle}
         >
-          <span className="codicon codicon-close" style={{ fontSize: 11 }} />
+          <span className="vs-dirty-glyph" style={{ fontSize: 10, color: 'var(--vs-accent-light, var(--vs-accent))', lineHeight: 1 }}>
+            ●
+          </span>
+          <span className="vs-close-glyph codicon codicon-close" style={{ fontSize: 11 }} />
         </button>
       </div>
     );
@@ -724,7 +1178,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         display: 'flex',
         alignItems: 'center',
         gap: 2,
-        padding: '0 4px',
+        padding: '0 6px',
         flexShrink: 0,
         position: 'relative',
       }}
@@ -732,6 +1186,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     >
       {/* Active Files Dropdown (▾) */}
       <button
+        className="vs-tab-icon-btn"
         title="Active Files"
         onClick={() => {
           setActiveFilesMenuOpen((v) => !v);
@@ -745,6 +1200,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       {/* Split / Unsplit Document Groups */}
       {splitMode === 'none' ? (
         <button
+          className="vs-tab-icon-btn"
           title="Split Vertical Document Group"
           onClick={() => setSplitMode('vertical')}
           style={tabWellActionBtnStyle}
@@ -753,6 +1209,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         </button>
       ) : (
         <button
+          className="vs-tab-icon-btn"
           title="Merge Document Groups"
           onClick={() => setSplitMode('none')}
           style={tabWellActionBtnStyle}
@@ -763,6 +1220,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
 
       {/* Tab Layout & Color Settings Gear (⚙) */}
       <button
+        className="vs-tab-icon-btn"
         title="Tab Layout & Options"
         onClick={() => {
           setTabSettingsOpen((v) => !v);
@@ -776,14 +1234,12 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       {/* Active Files Searchable Dropdown */}
       {activeFilesMenuOpen && (
         <div
+          className="vs-menu-popup"
           style={{
             position: 'absolute',
-            top: '100%',
+            top: 'calc(100% + 4px)',
             right: 0,
             width: 280,
-            background: 'var(--vs-bg-panel)',
-            border: '1px solid var(--vs-border)',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.55)',
             zIndex: 950,
             padding: 6,
           }}
@@ -794,7 +1250,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
             value={activeFilesFilter}
             onChange={(e) => setActiveFilesFilter(e.target.value)}
             autoFocus
-            style={{ width: '100%', height: 22, fontSize: 11, marginBottom: 6 }}
+            style={{ width: '100%', height: 24, fontSize: 11.5, marginBottom: 6 }}
           />
           <div style={{ maxHeight: 260, overflowY: 'auto' }}>
             {openTabs
@@ -802,22 +1258,17 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               .map((t) => (
                 <button
                   key={t.id}
+                  className="vs-menu-item-btn"
                   onClick={() => {
                     setActiveTab(t.id, t.groupId ?? 0);
                     setActiveFilesMenuOpen(false);
                   }}
                   style={{
-                    width: '100%',
-                    display: 'flex',
-                    alignItems: 'center',
+                    justifyContent: 'flex-start',
                     gap: 6,
-                    padding: '4px 6px',
+                    padding: '4px 8px',
                     background: t.id === activeTab?.id ? 'var(--vs-bg-selection)' : 'transparent',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'var(--vs-fg)',
-                    textAlign: 'left',
-                    fontSize: 11.5,
+                    color: t.id === activeTab?.id ? '#FFFFFF' : 'var(--vs-fg)',
                   }}
                 >
                   {renderTabIcon(t)}
@@ -827,7 +1278,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
                   </span>
                   {t.isPinned && <span className="codicon codicon-pinned" style={{ fontSize: 11 }} />}
                   {t.projectName && (
-                    <span style={{ fontSize: 10, color: 'var(--vs-fg-muted)' }}>{t.projectName}</span>
+                    <span style={{ fontSize: 10, opacity: 0.7 }}>{t.projectName}</span>
                   )}
                 </button>
               ))}
@@ -841,16 +1292,13 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       {/* Tab Settings Popup */}
       {tabSettingsOpen && (
         <div
+          className="vs-menu-popup"
           style={{
             position: 'absolute',
-            top: '100%',
+            top: 'calc(100% + 4px)',
             right: 0,
             width: 245,
-            background: 'var(--vs-bg-panel)',
-            border: '1px solid var(--vs-border)',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.55)',
             zIndex: 950,
-            padding: '4px 0',
           }}
         >
           <CtxMenuItem
@@ -877,7 +1325,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               setTabSettingsOpen(false);
             }}
           />
-          <div style={{ height: 1, background: 'var(--vs-border)', margin: '4px 0' }} />
+          <div style={{ height: 1, background: 'var(--vs-border-subtle)', margin: '4px 4px' }} />
           <CtxMenuItem
             label="Colorize Tabs by Project"
             checked={colorizeTabsByProject}
@@ -900,7 +1348,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               setTabSettingsOpen(false);
             }}
           />
-          <div style={{ height: 1, background: 'var(--vs-border)', margin: '4px 0' }} />
+          <div style={{ height: 1, background: 'var(--vs-border-subtle)', margin: '4px 4px' }} />
           <CtxMenuItem
             label="Close All Documents"
             onClick={() => {
@@ -920,8 +1368,8 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       style={
         isVerticalTabs
           ? {
-              width: 196,
-              background: 'var(--vs-bg-panel)',
+              width: 202,
+              background: 'var(--vs-bg-chrome)',
               borderRight: tabLayout === 'left' ? '1px solid var(--vs-border)' : undefined,
               borderLeft: tabLayout === 'right' ? '1px solid var(--vs-border)' : undefined,
               display: 'flex',
@@ -929,12 +1377,13 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               flexShrink: 0,
             }
           : {
-              height: 29,
-              background: 'var(--vs-bg-panel)',
+              height: 32,
+              background: 'var(--vs-bg-chrome)',
               borderBottom: '1px solid var(--vs-border)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
+              paddingLeft: 4,
               flexShrink: 0,
             }
       }
@@ -943,7 +1392,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         <>
           <div
             style={{
-              height: 26,
+              height: 28,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
@@ -957,10 +1406,10 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
             <span>Open Documents ({groupTabs.length})</span>
             {tabWellControls}
           </div>
-          <div style={{ flex: 1, overflowY: 'auto' }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
             {pinnedTabs.length > 0 && (
-              <div style={{ borderBottom: '1px solid var(--vs-border)' }}>
-                <div style={{ fontSize: 10, padding: '3px 8px', color: 'var(--vs-fg-muted)' }}>PINNED</div>
+              <div style={{ borderBottom: '1px solid var(--vs-border-subtle)', marginBottom: 4, paddingBottom: 4 }}>
+                <div style={{ fontSize: 10, padding: '2px 8px', color: 'var(--vs-fg-muted)', fontWeight: 600 }}>PINNED</div>
                 {pinnedTabs.map(renderTabItem)}
               </div>
             )}
@@ -969,16 +1418,17 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         </>
       ) : (
         <>
-          <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', overflowX: 'auto', minWidth: 0 }}>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', overflowX: 'auto', minWidth: 0, height: '100%' }}>
             {pinnedTabs.map(renderTabItem)}
             {pinnedTabs.length > 0 && unpinnedTabs.length > 0 && (
               <div
                 style={{
-                  width: 3,
-                  height: 22,
+                  width: 2,
+                  height: 20,
                   alignSelf: 'center',
                   background: 'var(--vs-border)',
-                  margin: '0 2px',
+                  borderRadius: 1,
+                  margin: '0 4px',
                   flexShrink: 0,
                 }}
               />
@@ -995,12 +1445,12 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     <div
       onClick={(e) => e.stopPropagation()}
       style={{
-        height: 24,
+        height: 25,
         background: 'var(--vs-bg)',
         borderBottom: '1px solid var(--vs-border-subtle)',
         display: 'flex',
         alignItems: 'center',
-        padding: '0 8px',
+        padding: '0 10px',
         gap: 6,
         fontSize: 11.5,
         color: 'var(--vs-fg-muted)',
@@ -1019,7 +1469,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           <span className="codicon codicon-chevron-down" style={{ fontSize: 10 }} />
         </button>
         {navDropdown === 'project' && solution && (
-          <div style={navMenuStyle}>
+          <div className="vs-menu-popup" style={navMenuStyle}>
             {solution.projects.map((p) => (
               <CtxMenuItem
                 key={p.id}
@@ -1045,7 +1495,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           <span className="codicon codicon-chevron-down" style={{ fontSize: 10 }} />
         </button>
         {navDropdown === 'type' && outlineTypes.length > 0 && (
-          <div style={navMenuStyle}>
+          <div className="vs-menu-popup" style={navMenuStyle}>
             {outlineTypes.map((t, idx) => (
               <CtxMenuItem
                 key={`${t.name}:${idx}`}
@@ -1074,7 +1524,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
           <span className="codicon codicon-chevron-down" style={{ fontSize: 10 }} />
         </button>
         {navDropdown === 'member' && activeOutlineType && activeOutlineType.members.length > 0 && (
-          <div style={navMenuStyle}>
+          <div className="vs-menu-popup" style={navMenuStyle}>
             {activeOutlineType.members.map((m, idx) => (
               <CtxMenuItem
                 key={`${m.name}:${idx}`}
@@ -1090,8 +1540,8 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
         )}
       </div>
 
-      <span style={{ marginLeft: 'auto', fontSize: 11 }}>
-        Click margin to toggle Breakpoint (F9)
+      <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--vs-fg-muted)' }}>
+        F9 / Margin: Breakpoint · Cmd+.: Quick Fix
       </span>
     </div>
   );
@@ -1116,7 +1566,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
             }}
           >
             <VsLogoIcon size={64} />
-            <div style={{ fontSize: 15, color: 'var(--vs-fg)' }}>
+            <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--vs-fg)' }}>
               Visual Studio Community (.NET 10)
             </div>
             <div style={{ fontSize: 12, textAlign: 'center', maxWidth: 420, lineHeight: 1.6 }}>
@@ -1156,10 +1606,11 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               zIndex: 40,
               display: 'flex',
               alignItems: 'center',
-              background: 'var(--vs-bg-panel)',
+              background: 'var(--vs-menu-bg, var(--vs-bg-panel))',
               border: '1px solid var(--vs-border)',
-              borderRadius: 2,
-              opacity: 0.9,
+              borderRadius: 5,
+              boxShadow: '0 2px 8px rgba(0,0,0,0.28)',
+              opacity: 0.92,
             }}
           >
             <select
@@ -1167,7 +1618,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               value={editorZoom}
               onChange={(e) => setEditorZoom(Number(e.target.value))}
               className="vs-select"
-              style={{ border: 'none', height: 20, fontSize: 11, padding: '0 4px', background: 'transparent' }}
+              style={{ border: 'none', height: 21, fontSize: 11, padding: '0 6px', background: 'transparent' }}
             >
               {ZOOM_LEVELS.map((z) => (
                 <option key={z} value={z}>
@@ -1201,16 +1652,13 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       {/* Full Visual Studio Tab Right-Click Context Menu */}
       {ctxMenu && (
         <div
+          className="vs-menu-popup"
           onClick={(e) => e.stopPropagation()}
           style={{
             position: 'fixed',
             top: Math.min(ctxMenu.y, window.innerHeight - 360),
             left: Math.min(ctxMenu.x, window.innerWidth - 240),
-            width: 235,
-            background: 'var(--vs-bg-panel)',
-            border: '1px solid var(--vs-border)',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
-            padding: '4px 0',
+            width: 240,
             zIndex: 1000,
           }}
         >
@@ -1225,7 +1673,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
             label={isVerticalTabs ? 'Close Tabs Above' : 'Close Tabs to the Left'}
             onClick={() => { closeTabsToLeft(ctxMenu.tab.id); setCtxMenu(null); }}
           />
-          <div style={{ height: 1, background: 'var(--vs-border)', margin: '4px 0' }} />
+          <div style={{ height: 1, background: 'var(--vs-border-subtle)', margin: '4px 4px' }} />
           <CtxMenuItem
             label={ctxMenu.tab.isPinned ? 'Unpin Tab' : 'Pin Tab'}
             onClick={() => { togglePinTab(ctxMenu.tab.id); setCtxMenu(null); }}
@@ -1236,7 +1684,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               onClick={() => { promotePreviewTab(ctxMenu.tab.id); setCtxMenu(null); }}
             />
           )}
-          <div style={{ height: 1, background: 'var(--vs-border)', margin: '4px 0' }} />
+          <div style={{ height: 1, background: 'var(--vs-border-subtle)', margin: '4px 4px' }} />
           <CtxMenuItem
             label="Copy Full Path"
             onClick={() => {
@@ -1251,7 +1699,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               setCtxMenu(null);
             }}
           />
-          <div style={{ height: 1, background: 'var(--vs-border)', margin: '4px 0' }} />
+          <div style={{ height: 1, background: 'var(--vs-border-subtle)', margin: '4px 4px' }} />
           <CtxMenuItem
             label="New Vertical Document Group"
             onClick={() => {
@@ -1297,21 +1745,24 @@ const tabIconBtnStyle: React.CSSProperties = {
   border: 'none',
   cursor: 'pointer',
   color: 'inherit',
-  opacity: 0.75,
   display: 'inline-flex',
-  padding: 2,
-  borderRadius: 2,
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 18,
+  height: 18,
+  padding: 0,
+  borderRadius: 4,
 };
 
 const tabWellActionBtnStyle: React.CSSProperties = {
-  width: 22,
-  height: 22,
+  width: 24,
+  height: 24,
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
   background: 'transparent',
   border: 'none',
-  borderRadius: 2,
+  borderRadius: 5,
   cursor: 'pointer',
   color: 'var(--vs-fg)',
 };
@@ -1324,22 +1775,18 @@ const navBtnStyle: React.CSSProperties = {
   border: 'none',
   color: 'var(--vs-fg)',
   cursor: 'pointer',
-  padding: '2px 5px',
-  borderRadius: 2,
+  padding: '2px 6px',
+  borderRadius: 4,
   fontSize: 11.5,
 };
 
 const navMenuStyle: React.CSSProperties = {
   position: 'absolute',
-  top: '100%',
+  top: 'calc(100% + 2px)',
   left: 0,
-  minWidth: 210,
+  minWidth: 220,
   maxHeight: 260,
   overflowY: 'auto',
-  background: 'var(--vs-bg-panel)',
-  border: '1px solid var(--vs-border)',
-  boxShadow: '0 8px 24px rgba(0,0,0,0.55)',
-  padding: '4px 0',
   zIndex: 920,
 };
 
@@ -1349,24 +1796,11 @@ const CtxMenuItem: React.FC<{
   onClick: () => void;
 }> = ({ label, checked, onClick }) => (
   <button
+    className="vs-menu-item-btn"
     onClick={onClick}
-    style={{
-      width: '100%',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      padding: '5px 12px',
-      background: 'transparent',
-      border: 'none',
-      textAlign: 'left',
-      cursor: 'pointer',
-      color: 'var(--vs-fg)',
-      fontSize: 12,
-    }}
-    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--vs-bg-selection)')}
-    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+    style={{ justifyContent: 'flex-start', gap: 6, padding: '5px 10px' }}
   >
-    <span style={{ width: 14, display: 'inline-flex' }}>
+    <span style={{ width: 14, display: 'inline-flex', justifyContent: 'center' }}>
       {checked && <span className="codicon codicon-check" style={{ fontSize: 12 }} />}
     </span>
     <span>{label}</span>

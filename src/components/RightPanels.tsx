@@ -112,16 +112,19 @@ export const GitChangesPanel: React.FC = () => {
               style={{
                 display: 'flex',
                 justifyContent: 'space-between',
-                padding: '3px 6px',
+                padding: '4px 6px',
+                borderRadius: 4,
                 cursor: 'pointer',
               }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--vs-bg-hover)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
             >
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 [{c.status}] {c.relativePath}
               </span>
               <button
                 className="vs-btn"
-                style={{ padding: '0 5px' }}
+                style={{ padding: '0 6px' }}
                 onClick={async (e) => {
                   e.stopPropagation();
                   await window.vsApi.git.unstage(solution.dir, c.relativePath);
@@ -153,16 +156,19 @@ export const GitChangesPanel: React.FC = () => {
               style={{
                 display: 'flex',
                 justifyContent: 'space-between',
-                padding: '3px 6px',
+                padding: '4px 6px',
+                borderRadius: 4,
                 cursor: 'pointer',
               }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--vs-bg-hover)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
             >
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 [{c.status}] {c.relativePath}
               </span>
               <button
                 className="vs-btn"
-                style={{ padding: '0 5px' }}
+                style={{ padding: '0 6px' }}
                 onClick={async (e) => {
                   e.stopPropagation();
                   await window.vsApi.git.stage(solution.dir, c.relativePath);
@@ -203,6 +209,9 @@ export const GitChangesPanel: React.FC = () => {
 
 export const PropertiesPanel: React.FC = () => {
   const { solution, selectedPropertyTarget } = useIdeStore();
+  const [filePropOverrides, setFilePropOverrides] = useState<
+    Record<string, { buildAction?: string; copyToOutput?: string }>
+  >({});
 
   if (!selectedPropertyTarget) {
     return (
@@ -223,19 +232,75 @@ export const PropertiesPanel: React.FC = () => {
     useIdeStore.setState({ solution: updated });
   };
 
+  const defaultBuildAction = selectedPropertyTarget.name.endsWith('.cs')
+    ? 'C# compiler'
+    : selectedPropertyTarget.name.endsWith('.json') || selectedPropertyTarget.name.endsWith('.config')
+    ? 'Content'
+    : 'None';
+  const curFileProps = filePropOverrides[selectedPropertyTarget.path] || {};
+  const buildAction = curFileProps.buildAction ?? defaultBuildAction;
+  const copyToOutput = curFileProps.copyToOutput ?? 'Do not copy';
+
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
       <div style={{ fontWeight: 600, color: 'var(--vs-fg-bright)', marginBottom: 8 }}>
         {selectedPropertyTarget.name} ({selectedPropertyTarget.kind})
       </div>
 
-      <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid var(--vs-border)' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid var(--vs-border)', borderRadius: 5, overflow: 'hidden' }}>
         <tbody>
           <PropRow label="Name" value={selectedPropertyTarget.name} />
           <PropRow label="Full Path" value={selectedPropertyTarget.path} />
 
+          {selectedPropertyTarget.kind === 'file' && (
+            <>
+              <tr style={{ borderBottom: '1px solid var(--vs-border-subtle)' }}>
+                <td style={{ padding: '5px 8px', color: 'var(--vs-fg-muted)', width: '42%' }}>Build Action</td>
+                <td style={{ padding: '4px 6px' }}>
+                  <select
+                    className="vs-select"
+                    value={buildAction}
+                    onChange={(e) =>
+                      setFilePropOverrides((prev) => ({
+                        ...prev,
+                        [selectedPropertyTarget.path]: { ...prev[selectedPropertyTarget.path], buildAction: e.target.value },
+                      }))
+                    }
+                    style={{ width: '100%' }}
+                  >
+                    <option value="C# compiler">C# compiler</option>
+                    <option value="Content">Content</option>
+                    <option value="Embedded resource">Embedded resource</option>
+                    <option value="None">None</option>
+                  </select>
+                </td>
+              </tr>
+              <tr>
+                <td style={{ padding: '5px 8px', color: 'var(--vs-fg-muted)' }}>Copy to Output Directory</td>
+                <td style={{ padding: '4px 6px' }}>
+                  <select
+                    className="vs-select"
+                    value={copyToOutput}
+                    onChange={(e) =>
+                      setFilePropOverrides((prev) => ({
+                        ...prev,
+                        [selectedPropertyTarget.path]: { ...prev[selectedPropertyTarget.path], copyToOutput: e.target.value },
+                      }))
+                    }
+                    style={{ width: '100%' }}
+                  >
+                    <option value="Do not copy">Do not copy</option>
+                    <option value="Copy always">Copy always</option>
+                    <option value="Copy if newer">Copy if newer</option>
+                  </select>
+                </td>
+              </tr>
+            </>
+          )}
+
           {project && (
             <>
+              <PropRow label="Assembly Name" value={project.name} />
               <tr style={{ borderBottom: '1px solid var(--vs-border-subtle)' }}>
                 <td style={{ padding: '5px 8px', color: 'var(--vs-fg-muted)', width: '42%' }}>Target Framework</td>
                 <td style={{ padding: '4px 6px' }}>

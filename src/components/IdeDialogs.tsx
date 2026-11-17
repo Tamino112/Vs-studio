@@ -239,18 +239,37 @@ export const QuickLaunchDialog: React.FC = () => {
 
   const commands = [
     { label: 'File: New Project...', action: () => store.setDialog({ newProjectOpen: true }) },
+    {
+      label: 'File: Open Project/Solution...',
+      action: () =>
+        void window.vsApi?.dialog.openSolution().then((p) => {
+          if (p) void store.openSolution(p);
+        }),
+    },
     { label: 'File: Add New Project to Solution...', action: () => store.setDialog({ addNewProjectOpen: true }) },
+    { label: 'Edit: Undo', action: () => store.dispatchEditorCommand('undo') },
+    { label: 'Edit: Redo', action: () => store.dispatchEditorCommand('redo') },
+    { label: 'Edit: Find in Active Document', action: () => store.dispatchEditorCommand('find') },
+    { label: 'Edit: Replace in Active Document', action: () => store.dispatchEditorCommand('replace') },
+    { label: 'Edit: Find in Files', action: () => store.setDialog({ findInFilesOpen: true }) },
+    { label: 'Edit: Comment Selection', action: () => store.dispatchEditorCommand('comment') },
+    { label: 'Edit: Uncomment Selection', action: () => store.dispatchEditorCommand('uncomment') },
+    { label: 'Edit: Format Document', action: () => store.dispatchEditorCommand('format') },
+    { label: 'Navigate: Backward', action: () => void store.navigateBack() },
+    { label: 'Navigate: Forward', action: () => void store.navigateForward() },
     { label: 'Build: Build Solution', action: () => void store.buildSolution('build') },
     { label: 'Build: Rebuild Solution', action: () => void store.buildSolution('rebuild') },
     { label: 'Build: Clean Solution', action: () => void store.buildSolution('clean') },
     { label: 'Debug: Start Debugging', action: () => void store.startDebugging(true) },
     { label: 'Debug: Start Without Debugging', action: () => void store.startDebugging(false) },
+    { label: 'Debug: Toggle Breakpoint (F9)', action: () => store.dispatchEditorCommand('toggleBreakpoint') },
     { label: 'Test: Run All Tests', action: () => void store.runTests() },
     { label: 'Tools: Manage NuGet Packages...', action: () => store.openNugetTab() },
     { label: 'Tools: Options...', action: () => store.setDialog({ toolsOptionsOpen: true }) },
     { label: 'View: Solution Explorer', action: () => store.setDock({ leftOpen: true, leftPanel: 'solutionExplorer' }) },
     { label: 'View: Class View', action: () => store.setDock({ leftOpen: true, leftPanel: 'classView' }) },
     { label: 'View: Toolbox', action: () => store.setDock({ leftOpen: true, leftPanel: 'toolbox' }) },
+    { label: 'View: Properties Window', action: () => store.setDock({ rightOpen: true, rightPanel: 'properties' }) },
     { label: 'View: Git Changes', action: () => store.setDock({ rightOpen: true, rightPanel: 'gitChanges' }) },
     { label: 'View: Error List', action: () => store.setDock({ bottomOpen: true, bottomPanel: 'errorList' }) },
     { label: 'View: Task List', action: () => store.setDock({ bottomOpen: true, bottomPanel: 'taskList' }) },
@@ -275,26 +294,16 @@ export const QuickLaunchDialog: React.FC = () => {
           onChange={(e) => setQuery(e.target.value)}
           autoFocus
         />
-        <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid var(--vs-border)' }}>
+        <div style={{ maxHeight: 290, overflowY: 'auto', border: '1px solid var(--vs-border)', borderRadius: 6, padding: 4 }}>
           {commands.map((cmd) => (
             <button
               key={cmd.label}
+              className="vs-menu-item-btn"
               onClick={() => {
                 store.setDialog({ quickLaunchOpen: false });
                 cmd.action();
               }}
-              style={{
-                width: '100%',
-                textAlign: 'left',
-                padding: '7px 12px',
-                background: 'transparent',
-                border: 'none',
-                borderBottom: '1px solid var(--vs-border-subtle)',
-                cursor: 'pointer',
-                color: 'var(--vs-fg)',
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--vs-bg-selection)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              style={{ justifyContent: 'flex-start', padding: '6px 10px' }}
             >
               {cmd.label}
             </button>
@@ -345,9 +354,9 @@ export const ToolsOptionsDialog: React.FC = () => {
               value={theme}
               onChange={(e) => setTheme(e.target.value as 'dark' | 'blue' | 'light')}
             >
-              <option value="dark">Dark (Default)</option>
+              <option value="dark">Dark (Fluent)</option>
               <option value="blue">Blue (Classic Visual Studio)</option>
-              <option value="light">Light</option>
+              <option value="light">Light (Fluent)</option>
             </select>
 
             <span>Keyboard mapping scheme:</span>
@@ -579,7 +588,8 @@ const ModalShell: React.FC<{
     style={{
       position: 'fixed',
       inset: 0,
-      background: 'rgba(0,0,0,0.6)',
+      background: 'rgba(0,0,0,0.56)',
+      backdropFilter: 'blur(4px)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
@@ -592,12 +602,14 @@ const ModalShell: React.FC<{
         maxWidth: '92vw',
         background: 'var(--vs-bg-panel)',
         border: '1px solid var(--vs-border)',
-        boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+        borderRadius: 10,
+        overflow: 'hidden',
+        boxShadow: 'var(--vs-shadow, 0 12px 36px rgba(0,0,0,0.6))',
       }}
     >
       <div
         style={{
-          padding: '10px 14px',
+          padding: '11px 16px',
           background: 'var(--vs-bg-chrome)',
           borderBottom: '1px solid var(--vs-border)',
           display: 'flex',
@@ -605,10 +617,10 @@ const ModalShell: React.FC<{
           alignItems: 'center',
         }}
       >
-        <strong style={{ color: 'var(--vs-fg-bright)', fontSize: 13 }}>{title}</strong>
+        <strong style={{ color: 'var(--vs-fg-bright)', fontSize: 13.5, fontWeight: 600 }}>{title}</strong>
         <button
           onClick={onClose}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--vs-fg)' }}
+          style={{ background: 'none', border: 'none', borderRadius: 5, padding: 4, cursor: 'pointer', color: 'var(--vs-fg)' }}
         >
           <span className="codicon codicon-close" />
         </button>

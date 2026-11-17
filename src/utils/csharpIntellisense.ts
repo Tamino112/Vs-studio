@@ -296,9 +296,10 @@ function extractDocumentSymbols(
     });
   }
 
-  const varDecl = /\b(?:var|string|int|long|double|float|bool|decimal|object|List<[^>]+>)\s+([A-Za-z_]\w*)\s*[=;,)]/g;
+  const varDecl =
+    /\b(?:var|string|int|long|double|float|bool|char|byte|decimal|object|dynamic|DateTime|Guid|Task(?:<[^>]+>)?|List<[^>]+>|Dictionary<[^>]+>|[A-Z][A-Za-z0-9_]*)(?:<[^>]+>)?(?:\[\])?\??\s+([A-Za-z_]\w*)\s*[=;,)]/g;
   while ((m = varDecl.exec(fullText)) !== null) {
-    if (!found.has(m[1])) {
+    if (!found.has(m[1]) && !CSHARP_KEYWORDS.includes(m[1])) {
       found.set(m[1], {
         label: m[1],
         kind: monacoInst.languages.CompletionItemKind.Variable,
@@ -308,6 +309,72 @@ function extractDocumentSymbols(
   }
 
   return [...found.values()];
+}
+
+export function getBuiltInCSharpHover(
+  model: monaco.editor.ITextModel,
+  position: monaco.Position,
+): monaco.languages.Hover | null {
+  const wordInfo = model.getWordAtPosition(position);
+  if (!wordInfo) return null;
+  const line = model.getLineContent(position.lineNumber);
+  const word = wordInfo.word;
+
+  // Member hover like Console.WriteLine
+  const before = line.slice(0, wordInfo.startColumn - 1);
+  const dotMatch = /([A-Za-z_]\w*)\.\s*$/.exec(before);
+  if (dotMatch) {
+    const ownerRaw = dotMatch[1];
+    const matchedOwner = Object.keys(TYPE_MEMBERS).find((k) => k.toLowerCase() === ownerRaw.toLowerCase());
+    if (matchedOwner) {
+      const member = TYPE_MEMBERS[matchedOwner].find((m) => m.label === word);
+      if (member) {
+        return {
+          range: {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: wordInfo.startColumn,
+            endColumn: wordInfo.endColumn,
+          },
+          contents: [
+            { value: `\`\`\`csharp\n${member.detail}\n\`\`\`` },
+            ...(member.documentation ? [{ value: member.documentation }] : []),
+          ],
+        };
+      }
+    }
+  }
+
+  // Global type hover
+  const globalType = GLOBAL_TYPES.find((g) => g.label === word);
+  if (globalType) {
+    return {
+      range: {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: wordInfo.startColumn,
+        endColumn: wordInfo.endColumn,
+      },
+      contents: [{ value: `\`\`\`csharp\n${globalType.kind.toLowerCase()} ${globalType.detail}\n\`\`\`` }],
+    };
+  }
+
+  // Declared variable type hover
+  const fullText = model.getValue();
+  const varTypeMatch = new RegExp(`\\b(var|string|int|long|double|float|bool|char|byte|decimal|object|dynamic|DateTime|Guid|Task(?:<[^>]+>)?|List<[^>]+>|Dictionary<[^>]+>|[A-Z][A-Za-z0-9_]*)(?:\\[\\])?\\??\\s+${word}\\b`).exec(fullText);
+  if (varTypeMatch) {
+    return {
+      range: {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: wordInfo.startColumn,
+        endColumn: wordInfo.endColumn,
+      },
+      contents: [{ value: `\`\`\`csharp\n(local variable) ${varTypeMatch[1]} ${word}\n\`\`\`` }],
+    };
+  }
+
+  return null;
 }
 
 export function getBuiltInCSharpCompletions(
@@ -337,6 +404,7 @@ export function getBuiltInCSharpCompletions(
     const fullText = model.getValue();
 
     let resolvedKey: string | null = null;
+    let needsCaseFix = false;
     if (rawTarget.startsWith('"')) {
       resolvedKey = 'string';
     } else {
@@ -344,6 +412,9 @@ export function getBuiltInCSharpCompletions(
       const staticMatch = Object.keys(TYPE_MEMBERS).find((k) => k.toLowerCase() === lowerTarget);
       if (staticMatch) {
         resolvedKey = staticMatch;
+        if (staticMatch !== rawTarget && /^[A-Z]/.test(staticMatch)) {
+          needsCaseFix = true;
+        }
       } else {
         const inferred = inferVariableType(fullText, rawTarget);
         if (inferred && TYPE_MEMBERS[inferred]) {
@@ -354,6 +425,21 @@ export function getBuiltInCSharpCompletions(
 
     if (!resolvedKey) return [];
 
+    const targetStartColumn = lineUntilCursor.length - memberAccessMatch[0].length + 1;
+    const fixEdits: monaco.languages.TextEdit[] | undefined = needsCaseFix
+      ? [
+          {
+            range: {
+              startLineNumber: position.lineNumber,
+              startColumn: targetStartColumn,
+              endLineNumber: position.lineNumber,
+              endColumn: targetStartColumn + rawTarget.length,
+            },
+            text: resolvedKey,
+          },
+        ]
+      : undefined;
+
     return TYPE_MEMBERS[resolvedKey].map((m) => ({
       label: m.label,
       kind: toMonacoKind(monacoInst, m.kind),
@@ -363,6 +449,7 @@ export function getBuiltInCSharpCompletions(
       insertTextRules: m.isSnippet
         ? monacoInst.languages.CompletionItemInsertTextRule.InsertAsSnippet
         : undefined,
+      additionalTextEdits: fixEdits,
       range,
     }));
   }
@@ -452,3 +539,129 @@ export function getBuiltInCSharpCompletions(
     ...snippets,
   ];
 }
+
+export function getBuiltInCSharpSignatureHelp(
+  model: monaco.editor.ITextModel,
+  position: monaco.Position,
+): monaco.languages.SignatureHelp | null {
+  const before = model.getValueInRange({
+    startLineNumber: position.lineNumber,
+    startColumn: 1,
+    endLineNumber: position.lineNumber,
+    endColumn: position.column,
+  });
+
+  const callMatch = /([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*\(([^()]*)$/.exec(before);
+  if (!callMatch) return null;
+
+  const [typeRaw, methodRaw] = callMatch[1].split('.');
+  const matchedKey = Object.keys(TYPE_MEMBERS).find((k) => k.toLowerCase() === typeRaw.toLowerCase());
+  if (!matchedKey) return null;
+
+  const member = TYPE_MEMBERS[matchedKey].find((m) => m.label.toLowerCase() === methodRaw.toLowerCase());
+  if (!member) return null;
+
+  const activeParam = callMatch[2].split(',').length - 1;
+  const sigText = member.detail;
+  const paramsMatch = /\(([^)]*)\)/.exec(sigText);
+  const parameters = (paramsMatch?.[1] || '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => ({ label: p }));
+
+  return {
+    signatures: [
+      {
+        label: sigText,
+        documentation: member.documentation,
+        parameters,
+      },
+    ],
+    activeSignature: 0,
+    activeParameter: Math.max(0, Math.min(activeParam, Math.max(0, parameters.length - 1))),
+  };
+}
+
+export const CSHARP_SEMANTIC_LEGEND = {
+  tokenTypes: ['type', 'method', 'variable', 'property', 'keyword'],
+  tokenModifiers: ['static'],
+};
+
+const CONTROL_KEYWORDS = new Set([
+  'if', 'else', 'switch', 'case', 'default', 'for', 'foreach', 'while', 'do',
+  'break', 'continue', 'return', 'yield', 'try', 'catch', 'finally', 'throw', 'await',
+]);
+
+export function encodeCSharpSemanticTokens(code: string): Uint32Array {
+  const lines = code.split(/\r?\n/);
+  const data: number[] = [];
+  let prevLine = 0;
+  let prevChar = 0;
+
+  const declaredVars = new Set<string>(['args', 'app', 'builder']);
+  const varRegex = /\b(?:var|string|int|long|double|float|bool|char|byte|decimal|object|DateTime|Guid|Task(?:<[^>]+>)?|List<[^>]+>|Dictionary<[^>]+>|[A-Z][A-Za-z0-9_]*)(?:\[\])?\??\s+([A-Za-z_]\w*)\s*(?:=|;|,|\))/g;
+  let vm: RegExpExecArray | null;
+  while ((vm = varRegex.exec(code)) !== null) {
+    declaredVars.add(vm[1]);
+  }
+  const knownTypes = new Set(GLOBAL_TYPES.map((t) => t.label));
+  const declaredTypeRegex = /\b(?:class|struct|record|interface|enum)\s+([A-Za-z_]\w*)/g;
+  while ((vm = declaredTypeRegex.exec(code)) !== null) {
+    knownTypes.add(vm[1]);
+  }
+
+  const pushToken = (lineIdx: number, colIdx: number, length: number, typeIdx: number) => {
+    if (length <= 0) return;
+    const dLine = lineIdx - prevLine;
+    const dChar = dLine === 0 ? colIdx - prevChar : colIdx;
+    data.push(dLine, dChar, length, typeIdx, 0);
+    prevLine = lineIdx;
+    prevChar = colIdx;
+  };
+
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx];
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('//')) continue;
+
+    // Mask string literals with spaces while preserving `{expr}` inside $"..."
+    const scanLine = line.replace(/"(?:\\.|[^"\\])*"/g, (m, _off: number) => {
+      if (line[_off - 1] === '$') {
+        const buf = Array<string>(m.length).fill(' ');
+        const interpRe = /\{([^{}]+)\}/g;
+        let im: RegExpExecArray | null;
+        while ((im = interpRe.exec(m)) !== null) {
+          if (m[im.index - 1] === '{') continue;
+          const inner = im[1].split(':')[0];
+          for (let k = 0; k < inner.length; k++) {
+            buf[im.index + 1 + k] = inner[k];
+          }
+        }
+        return buf.join('');
+      }
+      return ' '.repeat(m.length);
+    });
+
+    const tokRegex = /\b([A-Za-z_]\w*)\b(\s*\()?/g;
+    let m: RegExpExecArray | null;
+    while ((m = tokRegex.exec(scanLine)) !== null) {
+      const word = m[1];
+      const isCall = Boolean(m[2]);
+      const col = m.index;
+
+      if (CONTROL_KEYWORDS.has(word)) {
+        pushToken(lineIdx, col, word.length, 4); // control keyword
+      } else if (knownTypes.has(word)) {
+        pushToken(lineIdx, col, word.length, 0); // type
+      } else if (isCall && !CSHARP_KEYWORDS.includes(word)) {
+        pushToken(lineIdx, col, word.length, 1); // method
+      } else if (declaredVars.has(word)) {
+        pushToken(lineIdx, col, word.length, 2); // variable
+      }
+    }
+  }
+
+  return new Uint32Array(data);
+}
+

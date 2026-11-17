@@ -90,6 +90,18 @@ export const vsApi = {
       ipcRenderer.invoke('lsp:hover', file, line, ch),
     definition: (file: string, line: number, ch: number) =>
       ipcRenderer.invoke('lsp:definition', file, line, ch),
+    signatureHelp: (file: string, line: number, ch: number) =>
+      ipcRenderer.invoke('lsp:signatureHelp', file, line, ch),
+    codeAction: (
+      file: string,
+      sl: number,
+      sc: number,
+      el: number,
+      ec: number,
+      diagnostics: unknown[] = [],
+    ) => ipcRenderer.invoke('lsp:codeAction', file, sl, sc, el, ec, diagnostics),
+    references: (file: string, line: number, ch: number) =>
+      ipcRenderer.invoke('lsp:references', file, line, ch),
     rename: (file: string, line: number, ch: number, newName: string) =>
       ipcRenderer.invoke('lsp:rename', file, line, ch, newName),
     format: (file: string) => ipcRenderer.invoke('lsp:format', file),

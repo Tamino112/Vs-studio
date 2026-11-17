@@ -93,6 +93,8 @@ export interface DiagnosticItem {
   file: string;
   line: number;
   column: number;
+  endLine?: number;
+  endColumn?: number;
   source: 'Build' | 'IntelliSense';
 }
 

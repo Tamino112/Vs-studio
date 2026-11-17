@@ -67,7 +67,20 @@ export class CSharpLspClient {
               },
             },
             hover: { contentFormat: ['markdown', 'plaintext'] },
+            signatureHelp: {
+              signatureInformation: {
+                documentationFormat: ['markdown', 'plaintext'],
+                parameterInformation: { labelOffsetSupport: true },
+              },
+            },
             definition: { linkSupport: true },
+            references: { dynamicRegistration: false },
+            codeAction: {
+              codeActionLiteralSupport: {
+                codeActionKind: { valueSet: ['quickfix', 'refactor'] },
+              },
+            },
+            formatting: { dynamicRegistration: false },
             publishDiagnostics: { relatedInformation: true },
             rename: { prepareSupport: false },
           },
@@ -182,6 +195,42 @@ export class CSharpLspClient {
     });
   }
 
+  async signatureHelp(filePath: string, line: number, character: number): Promise<unknown> {
+    if (!this.isRunning()) return null;
+    return this.sendRequest('textDocument/signatureHelp', {
+      textDocument: { uri: pathToFileURL(filePath).toString() },
+      position: { line, character },
+    });
+  }
+
+  async codeAction(
+    filePath: string,
+    startLine: number,
+    startChar: number,
+    endLine: number,
+    endChar: number,
+    diagnostics: unknown[] = [],
+  ): Promise<unknown> {
+    if (!this.isRunning()) return null;
+    return this.sendRequest('textDocument/codeAction', {
+      textDocument: { uri: pathToFileURL(filePath).toString() },
+      range: {
+        start: { line: startLine, character: startChar },
+        end: { line: endLine, character: endChar },
+      },
+      context: { diagnostics },
+    });
+  }
+
+  async references(filePath: string, line: number, character: number): Promise<unknown> {
+    if (!this.isRunning()) return null;
+    return this.sendRequest('textDocument/references', {
+      textDocument: { uri: pathToFileURL(filePath).toString() },
+      position: { line, character },
+      context: { includeDeclaration: true },
+    });
+  }
+
   async formatDocument(filePath: string): Promise<unknown> {
     if (!this.isRunning()) return null;
     return this.sendRequest('textDocument/formatting', {
@@ -250,24 +299,37 @@ export class CSharpLspClient {
           const p = msg.params as {
             uri: string;
             diagnostics: Array<{
-              range: { start: { line: number; character: number } };
+              range: {
+                start: { line: number; character: number };
+                end?: { line: number; character: number };
+              };
               severity?: number;
-              code?: string | number;
+              code?: string | number | { value?: string | number };
               message: string;
             }>;
           };
           const filePath = p.uri.startsWith('file://') ? fileURLToPath(p.uri) : p.uri;
-          const mapped: DiagnosticItem[] = (p.diagnostics || []).map((d, idx) => ({
-            id: `lsp:${filePath}:${idx}:${d.range.start.line}:${d.message}`,
-            severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : 'message',
-            code: d.code ? String(d.code) : 'CS',
-            description: d.message,
-            project: path.basename(path.dirname(filePath)),
-            file: filePath,
-            line: d.range.start.line + 1,
-            column: d.range.start.character + 1,
-            source: 'IntelliSense',
-          }));
+          const mapped: DiagnosticItem[] = (p.diagnostics || []).map((d, idx) => {
+            const rawCode =
+              typeof d.code === 'object' && d.code !== null ? d.code.value : d.code;
+            const startLine = d.range.start.line + 1;
+            const startCol = d.range.start.character + 1;
+            const endLine = d.range.end ? d.range.end.line + 1 : startLine;
+            const endCol = d.range.end ? d.range.end.character + 1 : startCol + 1;
+            return {
+              id: `lsp:${filePath}:${idx}:${startLine}:${startCol}:${d.message}`,
+              severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : 'message',
+              code: rawCode ? String(rawCode) : 'CS',
+              description: d.message,
+              project: path.basename(path.dirname(filePath)),
+              file: filePath,
+              line: startLine,
+              column: startCol,
+              endLine,
+              endColumn: Math.max(startCol + 1, endCol),
+              source: 'IntelliSense',
+            };
+          });
           this.onDiagnosticsCb?.(filePath, mapped);
         }
       } catch {

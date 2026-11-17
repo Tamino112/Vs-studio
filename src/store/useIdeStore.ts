@@ -27,6 +27,69 @@ import {
 } from '../types/ide';
 import { applyThemeToDom } from '../themes/vsThemes';
 import { extractTodoTasks } from '../utils/csharpOutline';
+import { analyzeCSharpCode } from '../utils/csharpDiagnostics';
+
+export type EditorCommandType =
+  | 'undo'
+  | 'redo'
+  | 'comment'
+  | 'uncomment'
+  | 'format'
+  | 'find'
+  | 'replace'
+  | 'toggleBreakpoint';
+
+const LIVE_COVERED_CODES = new Set([
+  'CS0103',
+  'CS0219',
+  'CS1010',
+  'CS1513',
+  'CS1026',
+  'CS0117',
+  'CS0029',
+  'CS1002',
+]);
+
+export function selectEffectiveDiagnosticsForFile(state: Pick<IdeState, 'buildDiagnostics' | 'lspDiagnosticsByFile' | 'liveDiagnosticsByFile' | 'lspHasPublished' | 'lspStaleByFile'>, filePath: string): DiagnosticItem[] {
+  const buildForFile = state.buildDiagnostics.filter((d) => d.file === filePath);
+  const lspItems = state.lspDiagnosticsByFile[filePath] || [];
+  const liveItems = state.liveDiagnosticsByFile[filePath] || [];
+  const hasLsp = Boolean(state.lspHasPublished[filePath]);
+  const isStale = Boolean(state.lspStaleByFile[filePath]);
+
+  let intelItems: DiagnosticItem[];
+  if (!hasLsp || isStale) {
+    const deepLsp = isStale
+      ? lspItems.filter((d) => !LIVE_COVERED_CODES.has(d.code) && !liveItems.some((l) => l.line === d.line))
+      : [];
+    intelItems = [...liveItems, ...deepLsp];
+  } else {
+    intelItems = lspItems;
+  }
+
+  const seen = new Set<string>();
+  const combined: DiagnosticItem[] = [];
+  for (const d of [...intelItems, ...buildForFile]) {
+    const key = `${d.file}:${d.line}:${d.code}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    combined.push(d);
+  }
+  return combined;
+}
+
+export function selectAllEffectiveDiagnostics(state: Pick<IdeState, 'buildDiagnostics' | 'lspDiagnosticsByFile' | 'liveDiagnosticsByFile' | 'lspHasPublished' | 'lspStaleByFile' | 'openTabs'>): DiagnosticItem[] {
+  const fileSet = new Set<string>([
+    ...state.buildDiagnostics.map((d) => d.file),
+    ...Object.keys(state.lspDiagnosticsByFile),
+    ...Object.keys(state.liveDiagnosticsByFile),
+  ]);
+  const result: DiagnosticItem[] = [];
+  for (const file of fileSet) {
+    result.push(...selectEffectiveDiagnosticsForFile(state, file));
+  }
+  return result;
+}
 
 const PROJECT_TAB_COLORS = [
   '#007ACC', // Visual Studio Blue
@@ -95,9 +158,16 @@ export interface IdeState {
   activeGroupId: number;
   activeTabByGroup: Record<number, string | null>;
   pendingInsertSnippet: { id: number; text: string } | null;
+  pendingReveal: { filePath: string; line: number; column: number; nonce: number } | null;
+  editorCommand: { id: number; command: EditorCommandType } | null;
+  navHistory: Array<{ filePath: string; line: number; column: number }>;
+  navIndex: number;
 
   buildDiagnostics: DiagnosticItem[];
   lspDiagnosticsByFile: Record<string, DiagnosticItem[]>;
+  liveDiagnosticsByFile: Record<string, DiagnosticItem[]>;
+  lspHasPublished: Record<string, boolean>;
+  lspStaleByFile: Record<string, boolean>;
   outputChannels: OutputChannelData;
   activeOutputChannel: OutputChannelName;
 
@@ -168,12 +238,17 @@ export interface IdeState {
     filePath: string,
     line?: number,
     column?: number,
-    options?: { preview?: boolean; groupId?: number },
+    options?: { preview?: boolean; groupId?: number; skipHistory?: boolean },
   ) => Promise<void>;
   openNugetTab: (projectId?: string) => void;
   openDiffTab: (title: string, path: string, original: string, modified: string) => void;
   updateTabContent: (tabId: string, content: string) => void;
   setTabCursor: (tabId: string, line: number, column: number) => void;
+  consumePendingReveal: () => void;
+  recordNavigation: (filePath: string, line: number, column: number) => void;
+  navigateBack: () => Promise<void>;
+  navigateForward: () => Promise<void>;
+  dispatchEditorCommand: (command: EditorCommandType) => void;
   saveTab: (tabId: string) => Promise<void>;
   saveAllTabs: () => Promise<void>;
   closeTab: (tabId: string) => void;
@@ -272,9 +347,16 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   activeGroupId: 0,
   activeTabByGroup: { 0: null, 1: null },
   pendingInsertSnippet: null,
+  pendingReveal: null,
+  editorCommand: null,
+  navHistory: [],
+  navIndex: -1,
 
   buildDiagnostics: [],
   lspDiagnosticsByFile: {},
+  liveDiagnosticsByFile: {},
+  lspHasPublished: {},
+  lspStaleByFile: {},
   outputChannels: {
     Build: [],
     Debug: [],
@@ -380,8 +462,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       splitMode: 'none',
       activeGroupId: 0,
       activeTabByGroup: { 0: null, 1: null },
+      pendingReveal: null,
+      editorCommand: null,
+      navHistory: [],
+      navIndex: -1,
       buildDiagnostics: [],
       lspDiagnosticsByFile: {},
+      liveDiagnosticsByFile: {},
+      lspHasPublished: {},
+      lspStaleByFile: {},
       taskListItems: [],
       statusText: `Loaded solution '${sln.name}' (${sln.projects.length} project${sln.projects.length === 1 ? '' : 's'})`,
       selectedPropertyTarget: {
@@ -432,8 +521,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       splitMode: 'none',
       activeGroupId: 0,
       activeTabByGroup: { 0: null, 1: null },
+      pendingReveal: null,
+      editorCommand: null,
+      navHistory: [],
+      navIndex: -1,
       buildDiagnostics: [],
       lspDiagnosticsByFile: {},
+      liveDiagnosticsByFile: {},
+      lspHasPublished: {},
+      lspStaleByFile: {},
       gitStatus: null,
       tests: [],
       taskListItems: [],
@@ -490,12 +586,26 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     const isPreview = Boolean(options?.preview);
     const existing = get().openTabs.find((t) => t.kind === 'code' && t.path === filePath);
 
+    if (!options?.skipHistory) {
+      get().recordNavigation(filePath, line ?? existing?.cursorLine ?? 1, column ?? existing?.cursorColumn ?? 1);
+    }
+
     if (existing) {
       const grp = existing.groupId ?? 0;
       set((s) => ({
         activeTabId: existing.id,
         activeGroupId: grp,
         activeTabByGroup: { ...s.activeTabByGroup, [grp]: existing.id },
+        ...(line !== undefined
+          ? {
+              pendingReveal: {
+                filePath,
+                line,
+                column: column ?? 1,
+                nonce: Date.now() + Math.random(),
+              },
+            }
+          : {}),
         openTabs: s.openTabs.map((t) => {
           if (t.id !== existing.id) return t;
           return {
@@ -513,6 +623,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     const language = detectLanguage(filePath);
     const id = `code:${filePath}`;
     const projMeta = getProjectColor(get().solution, filePath);
+    const liveDiags =
+      language === 'csharp'
+        ? analyzeCSharpCode(filePath, projMeta.projectName || get().solution?.name || 'Project', content)
+        : undefined;
 
     const newTab: OpenTab = {
       id,
@@ -542,11 +656,29 @@ export const useIdeStore = create<IdeState>((set, get) => ({
         activeTabId: id,
         activeGroupId: targetGroup,
         activeTabByGroup: { ...s.activeTabByGroup, [targetGroup]: id },
+        ...(line !== undefined
+          ? {
+              pendingReveal: {
+                filePath,
+                line,
+                column: column ?? 1,
+                nonce: Date.now() + Math.random(),
+              },
+            }
+          : {}),
+        ...(liveDiags
+          ? {
+              liveDiagnosticsByFile: {
+                ...s.liveDiagnosticsByFile,
+                [filePath]: liveDiags,
+              },
+            }
+          : {}),
       };
     });
 
     if (language === 'csharp') {
-      void window.vsApi.lsp.didOpen(filePath, content);
+      void window.vsApi?.lsp.didOpen(filePath, content);
     }
   },
 
@@ -627,15 +759,32 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   updateTabContent: (tabId, content) => {
     const tab = get().openTabs.find((t) => t.id === tabId);
     if (!tab) return;
+    const liveDiags =
+      tab.kind === 'code' && tab.language === 'csharp'
+        ? analyzeCSharpCode(tab.path, tab.projectName || get().solution?.name || 'Project', content)
+        : undefined;
+
     set((s) => ({
       openTabs: s.openTabs.map((t) =>
         t.id === tabId
           ? { ...t, content, isDirty: content !== t.savedContent, isPreview: false }
           : t,
       ),
+      ...(liveDiags
+        ? {
+            liveDiagnosticsByFile: {
+              ...s.liveDiagnosticsByFile,
+              [tab.path]: liveDiags,
+            },
+            lspStaleByFile: {
+              ...s.lspStaleByFile,
+              [tab.path]: true,
+            },
+          }
+        : {}),
     }));
     if (tab.kind === 'code' && tab.language === 'csharp') {
-      void window.vsApi.lsp.didChange(tab.path, content);
+      void window.vsApi?.lsp.didChange(tab.path, content);
     }
   },
 
@@ -645,6 +794,44 @@ export const useIdeStore = create<IdeState>((set, get) => ({
         t.id === tabId ? { ...t, cursorLine: line, cursorColumn: column } : t,
       ),
     }));
+  },
+
+  consumePendingReveal: () => set({ pendingReveal: null }),
+
+  recordNavigation: (filePath, line, column) => {
+    set((s) => {
+      const current = s.navHistory[s.navIndex];
+      if (current && current.filePath === filePath && Math.abs(current.line - line) <= 3) {
+        return {};
+      }
+      const sliced = s.navHistory.slice(0, s.navIndex + 1);
+      const next = [...sliced, { filePath, line, column }].slice(-50);
+      return { navHistory: next, navIndex: next.length - 1 };
+    });
+  },
+
+  navigateBack: async () => {
+    const { navIndex, navHistory } = get();
+    if (navIndex <= 0) return;
+    const prevIdx = navIndex - 1;
+    const item = navHistory[prevIdx];
+    if (!item) return;
+    set({ navIndex: prevIdx });
+    await get().openFile(item.filePath, item.line, item.column, { skipHistory: true });
+  },
+
+  navigateForward: async () => {
+    const { navIndex, navHistory } = get();
+    if (navIndex < 0 || navIndex >= navHistory.length - 1) return;
+    const nextIdx = navIndex + 1;
+    const item = navHistory[nextIdx];
+    if (!item) return;
+    set({ navIndex: nextIdx });
+    await get().openFile(item.filePath, item.line, item.column, { skipHistory: true });
+  },
+
+  dispatchEditorCommand: (command) => {
+    set({ editorCommand: { id: Date.now() + Math.random(), command } });
   },
 
   saveTab: async (tabId) => {
@@ -658,7 +845,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       statusText: `Item(s) Saved (${tab.title})`,
     }));
     if (tab.language === 'csharp') {
-      void window.vsApi.lsp.didSave(tab.path, tab.content);
+      void window.vsApi?.lsp.didSave(tab.path, tab.content);
     }
     if (tab.path.endsWith('.csproj') || tab.path.endsWith('.sln') || tab.path.endsWith('.slnx')) {
       const sln = get().solution;
@@ -930,6 +1117,14 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       lspDiagnosticsByFile: {
         ...s.lspDiagnosticsByFile,
         [file]: items,
+      },
+      lspHasPublished: {
+        ...s.lspHasPublished,
+        [file]: true,
+      },
+      lspStaleByFile: {
+        ...s.lspStaleByFile,
+        [file]: false,
       },
     }));
   },

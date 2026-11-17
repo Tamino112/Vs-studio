@@ -29,6 +29,7 @@ export const TitleBarAndMenu: React.FC = () => {
 
   const hasSolution = Boolean(store.solution);
   const activeTab = store.openTabs.find((t) => t.id === store.activeTabId);
+  const isCodeTab = Boolean(activeTab && activeTab.kind === 'code');
 
   const handleOpenSolutionDialog = async () => {
     const p = await window.vsApi.dialog.openSolution();
@@ -71,39 +72,61 @@ export const TitleBarAndMenu: React.FC = () => {
       {
         label: `Save ${activeTab?.title ?? 'File'}`,
         shortcut: shortcuts.save,
-        disabled: !activeTab || activeTab.kind !== 'code',
-        action: () => activeTab && store.saveTab(activeTab.id),
+        disabled: !isCodeTab,
+        action: () => activeTab && void store.saveTab(activeTab.id),
       },
-      { label: 'Save All', shortcut: shortcuts.saveAll, action: () => store.saveAllTabs() },
+      { label: 'Save All', shortcut: shortcuts.saveAll, action: () => void store.saveAllTabs() },
       { separator: true },
       { label: 'Close Solution', disabled: !hasSolution, action: () => store.closeSolution() },
       { label: 'Start Window', action: () => store.setScreen('start') },
     ],
     Edit: [
+      { label: 'Undo', shortcut: store.keymap === 'macos' ? '⌘Z' : 'Ctrl+Z', disabled: !isCodeTab, action: () => store.dispatchEditorCommand('undo') },
+      { label: 'Redo', shortcut: store.keymap === 'macos' ? '⇧⌘Z' : 'Ctrl+Y', disabled: !isCodeTab, action: () => store.dispatchEditorCommand('redo') },
+      { separator: true },
+      { label: 'Find in Document', shortcut: shortcuts.find, disabled: !isCodeTab, action: () => store.dispatchEditorCommand('find') },
+      { label: 'Replace in Document', disabled: !isCodeTab, action: () => store.dispatchEditorCommand('replace') },
       { label: 'Find in Files', shortcut: shortcuts.findInFiles, action: () => store.setDialog({ findInFilesOpen: true }) },
+      { separator: true },
       {
-        label: 'Format Document (LSP)',
+        label: 'Comment Selection',
+        shortcut: store.keymap === 'macos' ? '⌘/' : 'Ctrl+/',
+        disabled: !isCodeTab,
+        action: () => store.dispatchEditorCommand('comment'),
+      },
+      {
+        label: 'Uncomment Selection',
+        disabled: !isCodeTab,
+        action: () => store.dispatchEditorCommand('uncomment'),
+      },
+      {
+        label: 'Format Document',
         shortcut: shortcuts.formatDoc,
-        disabled: !activeTab || activeTab.language !== 'csharp',
-        action: async () => {
-          if (!activeTab) return;
-          const edits = (await window.vsApi.lsp.format(activeTab.path)) as Array<{ newText: string }> | null;
-          if (edits?.length && edits[0].newText) {
-            store.updateTabContent(activeTab.id, edits[0].newText);
-          }
-        },
+        disabled: !isCodeTab,
+        action: () => store.dispatchEditorCommand('format'),
       },
       { separator: true },
       {
-        label: 'Toggle Word Wrap',
+        label: `${store.wordWrap ? '✓ ' : ''}Word Wrap`,
         action: () => store.setWordWrap(!store.wordWrap),
       },
       {
-        label: 'Toggle Minimap',
+        label: `${store.minimap ? '✓ ' : ''}Show Minimap`,
         action: () => store.setMinimap(!store.minimap),
       },
     ],
     View: [
+      {
+        label: 'Navigate Backward',
+        disabled: store.navIndex <= 0,
+        action: () => void store.navigateBack(),
+      },
+      {
+        label: 'Navigate Forward',
+        disabled: store.navIndex < 0 || store.navIndex >= store.navHistory.length - 1,
+        action: () => void store.navigateForward(),
+      },
+      { separator: true },
       {
         label: 'Solution Explorer',
         action: () => store.setDock({ leftOpen: true, leftPanel: 'solutionExplorer' }),
@@ -212,18 +235,18 @@ export const TitleBarAndMenu: React.FC = () => {
         label: 'Build Solution',
         shortcut: shortcuts.buildSolution,
         disabled: !hasSolution,
-        action: () => store.buildSolution('build'),
+        action: () => void store.buildSolution('build'),
       },
       {
         label: 'Rebuild Solution',
         shortcut: shortcuts.rebuildSolution,
         disabled: !hasSolution,
-        action: () => store.buildSolution('rebuild'),
+        action: () => void store.buildSolution('rebuild'),
       },
       {
         label: 'Clean Solution',
         disabled: !hasSolution,
-        action: () => store.buildSolution('clean'),
+        action: () => void store.buildSolution('clean'),
       },
     ],
     Debug: [
@@ -231,24 +254,30 @@ export const TitleBarAndMenu: React.FC = () => {
         label: 'Start Debugging',
         shortcut: shortcuts.startDebug,
         disabled: !hasSolution,
-        action: () => store.startDebugging(true),
+        action: () => void store.startDebugging(true),
       },
       {
         label: 'Start Without Debugging',
         shortcut: shortcuts.startWithoutDebug,
         disabled: !hasSolution,
-        action: () => store.startDebugging(false),
+        action: () => void store.startDebugging(false),
       },
       {
         label: 'Stop Debugging',
         shortcut: shortcuts.stopDebug,
         disabled: store.debugState === 'stopped',
-        action: () => store.stopDebugging(),
+        action: () => void store.stopDebugging(),
+      },
+      {
+        label: 'Toggle Breakpoint',
+        shortcut: shortcuts.toggleBreakpoint,
+        disabled: !isCodeTab,
+        action: () => store.dispatchEditorCommand('toggleBreakpoint'),
       },
       { separator: true },
-      { label: 'Step Over', shortcut: shortcuts.stepOver, disabled: store.debugState !== 'paused', action: () => store.stepOver() },
-      { label: 'Step Into', shortcut: shortcuts.stepInto, disabled: store.debugState !== 'paused', action: () => store.stepInto() },
-      { label: 'Step Out', shortcut: shortcuts.stepOut, disabled: store.debugState !== 'paused', action: () => store.stepOut() },
+      { label: 'Step Over', shortcut: shortcuts.stepOver, disabled: store.debugState !== 'paused', action: () => void store.stepOver() },
+      { label: 'Step Into', shortcut: shortcuts.stepInto, disabled: store.debugState !== 'paused', action: () => void store.stepInto() },
+      { label: 'Step Out', shortcut: shortcuts.stepOut, disabled: store.debugState !== 'paused', action: () => void store.stepOut() },
       { separator: true },
       {
         label: 'Windows -> Locals',
@@ -271,7 +300,7 @@ export const TitleBarAndMenu: React.FC = () => {
       {
         label: 'Run All Tests',
         disabled: !hasSolution,
-        action: () => store.runTests(),
+        action: () => void store.runTests(),
       },
       {
         label: 'Test Explorer',
@@ -370,16 +399,17 @@ export const TitleBarAndMenu: React.FC = () => {
       ref={menuRef}
       className="vs-drag-region"
       style={{
-        height: 32,
+        height: 36,
         background: 'var(--vs-bg-titlebar)',
         borderBottom: '1px solid var(--vs-border-subtle)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        paddingLeft: window.vsApi?.platform === 'darwin' ? 78 : 10,
-        paddingRight: 10,
+        paddingLeft: window.vsApi?.platform === 'darwin' ? 78 : 12,
+        paddingRight: 12,
         position: 'relative',
         zIndex: 200,
+        flexShrink: 0,
       }}
     >
       {/* Left: VS Logo + Menu Bar */}
@@ -389,7 +419,7 @@ export const TitleBarAndMenu: React.FC = () => {
           title="Visual Studio Community (Click for Start Window)"
           style={{ display: 'flex', alignItems: 'center', padding: '0 6px', cursor: 'pointer' }}
         >
-          <VsLogoIcon size={16} />
+          <VsLogoIcon size={17} />
         </div>
 
         {Object.keys(menus).map((menuName) => {
@@ -404,11 +434,12 @@ export const TitleBarAndMenu: React.FC = () => {
                 style={{
                   background: isOpen ? 'var(--vs-bg-hover)' : 'transparent',
                   border: 'none',
-                  padding: '3px 8px',
+                  padding: '4px 8px',
                   fontSize: 12,
                   color: 'var(--vs-fg)',
                   cursor: 'pointer',
-                  borderRadius: 2,
+                  borderRadius: 5,
+                  transition: 'background 0.1s ease',
                 }}
               >
                 {menuName}
@@ -416,15 +447,12 @@ export const TitleBarAndMenu: React.FC = () => {
 
               {isOpen && (
                 <div
+                  className="vs-menu-popup"
                   style={{
                     position: 'absolute',
-                    top: '100%',
+                    top: 'calc(100% + 4px)',
                     left: 0,
-                    minWidth: 250,
-                    background: 'var(--vs-bg-panel)',
-                    border: '1px solid var(--vs-border)',
-                    boxShadow: '0 6px 18px rgba(0,0,0,0.45)',
-                    padding: '4px 0',
+                    minWidth: 265,
                     zIndex: 500,
                   }}
                 >
@@ -432,39 +460,27 @@ export const TitleBarAndMenu: React.FC = () => {
                     item.separator ? (
                       <div
                         key={idx}
-                        style={{ height: 1, background: 'var(--vs-border)', margin: '4px 0' }}
+                        style={{ height: 1, background: 'var(--vs-border-subtle)', margin: '4px 4px' }}
                       />
                     ) : (
                       <button
                         key={idx}
+                        className="vs-menu-item-btn"
                         disabled={item.disabled}
                         onClick={() => {
                           setOpenMenu(null);
                           item.action?.();
                         }}
                         style={{
-                          width: '100%',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          padding: '5px 14px',
-                          background: 'transparent',
-                          border: 'none',
-                          textAlign: 'left',
+                          padding: '5px 10px',
                           cursor: item.disabled ? 'default' : 'pointer',
                           color: item.disabled ? 'var(--vs-fg-muted)' : 'var(--vs-fg)',
-                          opacity: item.disabled ? 0.5 : 1,
-                        }}
-                        onMouseEnter={(e) => {
-                          if (!item.disabled) e.currentTarget.style.background = 'var(--vs-bg-selection)';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = 'transparent';
+                          opacity: item.disabled ? 0.45 : 1,
                         }}
                       >
                         <span>{item.label}</span>
                         {item.shortcut && (
-                          <span style={{ fontSize: 11, color: 'var(--vs-fg-muted)', marginLeft: 18 }}>
+                          <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 18 }}>
                             {item.shortcut}
                           </span>
                         )}
@@ -478,7 +494,7 @@ export const TitleBarAndMenu: React.FC = () => {
         })}
       </div>
 
-      {/* Center: Quick Launch Search Bar (like Visual Studio Search Ctrl+Q / Cmd+Q) */}
+      {/* Center: Fluent Pill Search Bar (like Visual Studio Search Ctrl+Q / Cmd+Q) */}
       <div className="vs-no-drag" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <button
           onClick={() => store.setDialog({ quickLaunchOpen: true })}
@@ -486,15 +502,15 @@ export const TitleBarAndMenu: React.FC = () => {
             display: 'flex',
             alignItems: 'center',
             gap: 8,
-            width: 280,
-            height: 22,
-            padding: '0 8px',
+            width: 290,
+            height: 24,
+            padding: '0 12px',
             background: 'var(--vs-bg-input)',
             border: '1px solid var(--vs-border)',
-            borderRadius: 2,
+            borderRadius: 12,
             color: 'var(--vs-fg-muted)',
             cursor: 'pointer',
-            fontSize: 11,
+            fontSize: 11.5,
           }}
         >
           <span className="codicon codicon-search" style={{ fontSize: 12 }} />
@@ -507,7 +523,7 @@ export const TitleBarAndMenu: React.FC = () => {
               padding: '2px 10px',
               background: 'var(--vs-purple-dark)',
               color: '#FFFFFF',
-              borderRadius: 2,
+              borderRadius: 12,
               fontSize: 11,
               fontWeight: 600,
               maxWidth: 220,
@@ -523,7 +539,16 @@ export const TitleBarAndMenu: React.FC = () => {
 
       {/* Right: Private Edition Indicator (No Copilot!) */}
       <div className="vs-no-drag" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 11, color: 'var(--vs-fg-muted)' }}>
+        <span
+          style={{
+            fontSize: 11,
+            color: 'var(--vs-fg-muted)',
+            padding: '2px 8px',
+            borderRadius: 10,
+            background: 'var(--vs-bg-panel)',
+            border: '1px solid var(--vs-border-subtle)',
+          }}
+        >
           Community • .NET 10
         </span>
       </div>

@@ -46,6 +46,8 @@ export const StartWindow: React.FC = () => {
         flexDirection: 'column',
         height: '100vh',
         background: 'var(--vs-bg)',
+        backgroundImage:
+          'radial-gradient(ellipse at top right, rgba(0, 120, 212, 0.1), transparent 55%), radial-gradient(ellipse at bottom left, rgba(139, 92, 246, 0.08), transparent 50%)',
         color: 'var(--vs-fg)',
       }}
     >
@@ -53,7 +55,7 @@ export const StartWindow: React.FC = () => {
       <div
         className="vs-drag-region"
         style={{
-          height: 36,
+          height: 38,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -64,8 +66,8 @@ export const StartWindow: React.FC = () => {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <VsLogoIcon size={16} />
-          <span style={{ fontSize: 12, color: 'var(--vs-fg)' }}>
+          <VsLogoIcon size={17} />
+          <span style={{ fontSize: 12, color: 'var(--vs-fg)', fontWeight: 500 }}>
             Microsoft Visual Studio Community (macOS) — .NET 10
           </span>
         </div>
@@ -73,9 +75,9 @@ export const StartWindow: React.FC = () => {
           <span
             style={{
               fontSize: 11,
-              padding: '2px 8px',
-              borderRadius: 10,
-              background: envStatus?.dotnetInstalled ? 'rgba(56,138,52,0.2)' : 'rgba(204,167,0,0.2)',
+              padding: '2px 10px',
+              borderRadius: 12,
+              background: envStatus?.dotnetInstalled ? 'rgba(56,138,52,0.18)' : 'rgba(204,167,0,0.18)',
               color: envStatus?.dotnetInstalled ? 'var(--vs-success)' : 'var(--vs-warning)',
               border: '1px solid var(--vs-border)',
             }}
@@ -89,15 +91,15 @@ export const StartWindow: React.FC = () => {
             value={theme}
             onChange={(e) => setTheme(e.target.value as 'dark' | 'blue' | 'light')}
             title="Switch Visual Studio Theme"
-            style={{ fontSize: 11 }}
+            style={{ fontSize: 11.5 }}
           >
-            <option value="dark">Theme: Dark</option>
+            <option value="dark">Theme: Dark (Fluent)</option>
             <option value="blue">Theme: Blue</option>
-            <option value="light">Theme: Light</option>
+            <option value="light">Theme: Light (Fluent)</option>
           </select>
           <button
             className="vs-btn"
-            style={{ fontSize: 11, padding: '2px 8px' }}
+            style={{ fontSize: 11.5, padding: '3px 10px' }}
             onClick={() => setDialog({ toolsOptionsOpen: true })}
           >
             <span className="codicon codicon-settings-gear" /> Options
@@ -105,25 +107,25 @@ export const StartWindow: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Content Centered like VS 2022 Start Window */}
+      {/* Main Content Centered like Modern VS 2022/2026 Fluent Start Window */}
       <div
         style={{
           flex: 1,
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
-          padding: '24px 40px',
+          padding: '28px 44px',
           overflow: 'auto',
         }}
       >
-        <div style={{ width: '100%', maxWidth: 940 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
-            <VsLogoIcon size={34} />
+        <div style={{ width: '100%', maxWidth: 960 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 28 }}>
+            <VsLogoIcon size={38} />
             <div>
-              <h1 style={{ fontSize: 26, fontWeight: 400, color: 'var(--vs-fg-bright)' }}>
+              <h1 style={{ fontSize: 27, fontWeight: 500, color: 'var(--vs-fg-bright)', letterSpacing: '-0.01em' }}>
                 Visual Studio Community
               </h1>
-              <div style={{ fontSize: 12, color: 'var(--vs-fg-muted)' }}>
+              <div style={{ fontSize: 12.5, color: 'var(--vs-fg-muted)' }}>
                 C# &amp; .NET 10 Development Environment for macOS • Private Edition
               </div>
             </div>
@@ -132,14 +134,14 @@ export const StartWindow: React.FC = () => {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 390px',
-              gap: 36,
+              gridTemplateColumns: '1fr 400px',
+              gap: 38,
               alignItems: 'start',
             }}
           >
             {/* Left Column: Open recent */}
             <div>
-              <h2 style={{ fontSize: 16, fontWeight: 400, color: 'var(--vs-fg-bright)', marginBottom: 12 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 500, color: 'var(--vs-fg-bright)', marginBottom: 12 }}>
                 Open recent
               </h2>
               <div style={{ position: 'relative', marginBottom: 12 }}>
@@ -147,8 +149,8 @@ export const StartWindow: React.FC = () => {
                   className="codicon codicon-search"
                   style={{
                     position: 'absolute',
-                    left: 9,
-                    top: 7,
+                    left: 10,
+                    top: 8,
                     fontSize: 13,
                     color: 'var(--vs-fg-muted)',
                   }}
@@ -158,13 +160,13 @@ export const StartWindow: React.FC = () => {
                   value={filter}
                   onChange={(e) => setFilter(e.target.value)}
                   placeholder="Search recent projects and solutions (Alt+S)"
-                  style={{ width: '100%', paddingLeft: 28, height: 28 }}
+                  style={{ width: '100%', paddingLeft: 30, height: 30, borderRadius: 6 }}
                 />
               </div>
 
               <div
                 style={{
-                  maxHeight: 370,
+                  maxHeight: 375,
                   overflowY: 'auto',
                   display: 'flex',
                   flexDirection: 'column',
@@ -177,7 +179,8 @@ export const StartWindow: React.FC = () => {
                       padding: 20,
                       border: '1px dashed var(--vs-border)',
                       color: 'var(--vs-fg-muted)',
-                      borderRadius: 3,
+                      borderRadius: 8,
+                      background: 'var(--vs-bg-panel)',
                     }}
                   >
                     No recent solutions or projects yet. Click <strong>Create a new project</strong> on the right to start a .NET 10 Console App, Web API, or Multi-Project Solution.
@@ -186,15 +189,15 @@ export const StartWindow: React.FC = () => {
 
                 {pinned.length > 0 && (
                   <>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--vs-fg-muted)', padding: '6px 4px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--vs-fg-muted)', padding: '6px 6px' }}>
                       Pinned
                     </div>
                     {pinned.map((item) => (
                       <RecentRow
                         key={item.path}
                         item={item}
-                        onOpen={() => openSolution(item.path)}
-                        onTogglePin={(e) => handleTogglePin(e, item.path)}
+                        onOpen={() => void openSolution(item.path)}
+                        onTogglePin={(e) => void handleTogglePin(e, item.path)}
                       />
                     ))}
                   </>
@@ -202,15 +205,15 @@ export const StartWindow: React.FC = () => {
 
                 {unpinned.length > 0 && (
                   <>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--vs-fg-muted)', padding: '8px 4px 4px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--vs-fg-muted)', padding: '8px 6px 4px' }}>
                       Recent
                     </div>
                     {unpinned.map((item) => (
                       <RecentRow
                         key={item.path}
                         item={item}
-                        onOpen={() => openSolution(item.path)}
-                        onTogglePin={(e) => handleTogglePin(e, item.path)}
+                        onOpen={() => void openSolution(item.path)}
+                        onTogglePin={(e) => void handleTogglePin(e, item.path)}
                       />
                     ))}
                   </>
@@ -220,7 +223,7 @@ export const StartWindow: React.FC = () => {
 
             {/* Right Column: Get started cards */}
             <div>
-              <h2 style={{ fontSize: 16, fontWeight: 400, color: 'var(--vs-fg-bright)', marginBottom: 12 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 500, color: 'var(--vs-fg-bright)', marginBottom: 12 }}>
                 Get started
               </h2>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -234,13 +237,13 @@ export const StartWindow: React.FC = () => {
                   icon="codicon-folder-opened"
                   title="Open a project or solution"
                   subtitle="Open a local Visual Studio .sln, .slnx, or .csproj file"
-                  onClick={handleOpenProjectDialog}
+                  onClick={() => void handleOpenProjectDialog()}
                 />
                 <StartCard
                   icon="codicon-folder"
                   title="Open a local folder"
                   subtitle="Navigate and edit code within any folder"
-                  onClick={handleOpenFolderDialog}
+                  onClick={() => void handleOpenFolderDialog()}
                 />
                 <StartCard
                   icon="codicon-new-file"
@@ -257,9 +260,10 @@ export const StartWindow: React.FC = () => {
                   style={{
                     background: 'none',
                     border: 'none',
-                    color: 'var(--vs-accent-hover)',
+                    color: 'var(--vs-accent-light, var(--vs-accent-hover))',
                     cursor: 'pointer',
                     fontSize: 13,
+                    fontWeight: 500,
                   }}
                 >
                   Continue without code →
@@ -287,9 +291,10 @@ const RecentRow: React.FC<{
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '8px 10px',
-        borderRadius: 3,
+        borderRadius: 6,
         cursor: 'pointer',
         border: '1px solid transparent',
+        transition: 'background 0.12s ease',
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.background = 'var(--vs-bg-hover)';
@@ -335,7 +340,7 @@ const RecentRow: React.FC<{
             background: 'none',
             border: 'none',
             cursor: 'pointer',
-            color: item.pinned ? 'var(--vs-accent)' : 'var(--vs-fg-muted)',
+            color: item.pinned ? 'var(--vs-accent-light, var(--vs-accent))' : 'var(--vs-fg-muted)',
           }}
         >
           <span className={`codicon ${item.pinned ? 'codicon-pinned' : 'codicon-pin'}`} />
@@ -362,9 +367,10 @@ const StartCard: React.FC<{
       textAlign: 'left',
       background: 'var(--vs-bg-panel)',
       border: `1px solid ${highlight ? 'var(--vs-accent)' : 'var(--vs-border)'}`,
-      borderRadius: 3,
+      borderRadius: 8,
+      boxShadow: highlight ? '0 4px 16px rgba(0, 120, 212, 0.14)' : 'none',
       cursor: 'pointer',
-      transition: 'background 0.12s, border-color 0.12s',
+      transition: 'background 0.14s ease, border-color 0.14s ease, transform 0.1s ease',
     }}
     onMouseEnter={(e) => {
       e.currentTarget.style.background = 'var(--vs-bg-hover)';
@@ -375,15 +381,28 @@ const StartCard: React.FC<{
       e.currentTarget.style.borderColor = highlight ? 'var(--vs-accent)' : 'var(--vs-border)';
     }}
   >
-    <span
-      className={`codicon ${icon}`}
-      style={{ fontSize: 22, color: 'var(--vs-purple)', marginTop: 2 }}
-    />
+    <div
+      style={{
+        width: 36,
+        height: 36,
+        borderRadius: 8,
+        background: 'rgba(139, 92, 246, 0.14)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      <span
+        className={`codicon ${icon}`}
+        style={{ fontSize: 20, color: 'var(--vs-purple)' }}
+      />
+    </div>
     <div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--vs-fg-bright)', marginBottom: 3 }}>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--vs-fg-bright)', marginBottom: 3 }}>
         {title}
       </div>
-      <div style={{ fontSize: 12, color: 'var(--vs-fg-muted)', lineHeight: 1.35 }}>
+      <div style={{ fontSize: 12, color: 'var(--vs-fg-muted)', lineHeight: 1.4 }}>
         {subtitle}
       </div>
     </div>

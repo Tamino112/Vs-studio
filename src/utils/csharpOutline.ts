@@ -79,6 +79,26 @@ export function parseCSharpOutline(content: string): OutlineType[] {
     }
   }
 
+  // Visual Studio shows Program / Top-level statements in navigation bar when using .NET top-level Program.cs
+  if (types.length === 0 && lines.some((l) => l.trim() && !l.trimStart().startsWith('//') && !l.trimStart().startsWith('using '))) {
+    const firstCodeIdx = lines.findIndex(
+      (l) => l.trim() && !l.trimStart().startsWith('//') && !l.trimStart().startsWith('using '),
+    );
+    types.push({
+      name: 'Program',
+      kind: 'class',
+      line: firstCodeIdx >= 0 ? firstCodeIdx + 1 : 1,
+      members: [
+        {
+          name: '<Main>$',
+          kind: 'method',
+          signature: '<Main>$(string[] args)',
+          line: firstCodeIdx >= 0 ? firstCodeIdx + 1 : 1,
+        },
+      ],
+    });
+  }
+
   return types;
 }
 

@@ -391,6 +391,17 @@ function registerIpc(): void {
   ipcMain.handle('lsp:definition', (_e, file: string, line: number, ch: number) =>
     lspClient.definition(file, line, ch),
   );
+  ipcMain.handle('lsp:signatureHelp', (_e, file: string, line: number, ch: number) =>
+    lspClient.signatureHelp(file, line, ch),
+  );
+  ipcMain.handle(
+    'lsp:codeAction',
+    (_e, file: string, sl: number, sc: number, el: number, ec: number, diagnostics: unknown[]) =>
+      lspClient.codeAction(file, sl, sc, el, ec, diagnostics),
+  );
+  ipcMain.handle('lsp:references', (_e, file: string, line: number, ch: number) =>
+    lspClient.references(file, line, ch),
+  );
   ipcMain.handle('lsp:rename', (_e, file: string, line: number, ch: number, newName: string) =>
     lspClient.rename(file, line, ch, newName),
   );

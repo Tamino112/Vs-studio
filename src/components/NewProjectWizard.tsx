@@ -132,7 +132,8 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0, 0, 0, 0.6)',
+        background: 'rgba(0, 0, 0, 0.56)',
+        backdropFilter: 'blur(4px)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -145,15 +146,17 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
           height: 580,
           background: 'var(--vs-bg-panel)',
           border: '1px solid var(--vs-border)',
+          borderRadius: 10,
+          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          boxShadow: '0 12px 40px rgba(0,0,0,0.6)',
+          boxShadow: 'var(--vs-shadow, 0 12px 40px rgba(0,0,0,0.6))',
         }}
       >
         {/* Header */}
         <div
           style={{
-            padding: '12px 18px',
+            padding: '13px 18px',
             borderBottom: '1px solid var(--vs-border)',
             display: 'flex',
             justifyContent: 'space-between',
@@ -161,7 +164,7 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
             background: 'var(--vs-bg-chrome)',
           }}
         >
-          <span style={{ fontSize: 15, fontWeight: 500, color: 'var(--vs-fg-bright)' }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--vs-fg-bright)' }}>
             {mode === 'newSolution'
               ? step === 1
                 ? 'Create a new project'
@@ -172,7 +175,7 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
           </span>
           <button
             onClick={close}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--vs-fg)' }}
+            style={{ background: 'none', border: 'none', borderRadius: 5, padding: 4, cursor: 'pointer', color: 'var(--vs-fg)' }}
           >
             <span className="codicon codicon-close" />
           </button>
@@ -187,14 +190,14 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
                 placeholder="Search for templates (e.g., Console, Web API, Blazor, xUnit)"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                style={{ flex: 1, height: 30 }}
+                style={{ flex: 1, height: 32 }}
                 autoFocus
               />
               <select
                 className="vs-select"
                 value="C#"
                 disabled
-                style={{ width: 120 }}
+                style={{ width: 120, height: 32 }}
               >
                 <option value="C#">C#</option>
               </select>
@@ -202,7 +205,7 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
                 className="vs-select"
                 value={categoryFilter}
                 onChange={(e) => setCategoryFilter(e.target.value)}
-                style={{ width: 150 }}
+                style={{ width: 150, height: 32 }}
               >
                 <option value="All">All project types</option>
                 <option value="Console">Console</option>
@@ -218,6 +221,8 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
                 flex: 1,
                 overflowY: 'auto',
                 border: '1px solid var(--vs-border)',
+                borderRadius: 7,
+                padding: 4,
                 background: 'var(--vs-bg)',
               }}
             >
@@ -235,9 +240,11 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
                       display: 'flex',
                       gap: 14,
                       padding: '12px 14px',
+                      marginBottom: 2,
+                      borderRadius: 6,
                       cursor: 'pointer',
                       background: active ? 'var(--vs-bg-selection)' : 'transparent',
-                      borderBottom: '1px solid var(--vs-border-subtle)',
+                      color: active ? '#FFFFFF' : 'var(--vs-fg)',
                     }}
                   >
                     <CSharpProjectIcon
@@ -245,10 +252,10 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
                       kind={tpl.category === 'Web' ? 'web' : tpl.category === 'Test' ? 'test' : 'exe'}
                     />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--vs-fg-bright)' }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: active ? '#FFFFFF' : 'var(--vs-fg-bright)' }}>
                         {tpl.name}
                       </div>
-                      <div style={{ fontSize: 12, color: active ? '#e0e0e0' : 'var(--vs-fg-muted)', margin: '2px 0 6px' }}>
+                      <div style={{ fontSize: 12, color: active ? '#e4e4e7' : 'var(--vs-fg-muted)', margin: '2px 0 6px' }}>
                         {tpl.description}
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -256,11 +263,11 @@ export const NewProjectWizard: React.FC<{ mode: 'newSolution' | 'addToSolution' 
                           <span
                             key={tag}
                             style={{
-                              fontSize: 10,
-                              padding: '1px 6px',
-                              borderRadius: 2,
-                              background: 'var(--vs-bg-chrome)',
-                              border: '1px solid var(--vs-border)',
+                              fontSize: 10.5,
+                              padding: '1px 8px',
+                              borderRadius: 999,
+                              background: active ? 'rgba(255,255,255,0.16)' : 'var(--vs-bg-chrome)',
+                              border: `1px solid ${active ? 'rgba(255,255,255,0.28)' : 'var(--vs-border)'}`,
                             }}
                           >
                             {tag}

@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { useIdeStore } from './store/useIdeStore';
+import { selectAllEffectiveDiagnostics, useIdeStore } from './store/useIdeStore';
 import { StartWindow } from './components/StartWindow';
 import { NewProjectWizard } from './components/NewProjectWizard';
 import { TitleBarAndMenu } from './components/TitleBarAndMenu';
@@ -78,7 +78,11 @@ export const App: React.FC = () => {
       window.vsApi.on('menu:command', (cmd) => {
         const s = useIdeStore.getState();
         if (cmd === 'file.newProject') s.setDialog({ newProjectOpen: true });
-        else if (cmd === 'file.save' && s.activeTabId) void s.saveTab(s.activeTabId);
+        else if (cmd === 'file.openSolution') {
+          void window.vsApi.dialog.openSolution().then((p) => {
+            if (p) void s.openSolution(p);
+          });
+        } else if (cmd === 'file.save' && s.activeTabId) void s.saveTab(s.activeTabId);
         else if (cmd === 'file.saveAll') void s.saveAllTabs();
         else if (cmd === 'file.closeSolution') s.closeSolution();
         else if (cmd === 'build.buildSolution') void s.buildSolution('build');
@@ -98,21 +102,40 @@ export const App: React.FC = () => {
   // Global IDE Keyboard Shortcuts (macOS + Windows modes)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const s = useIdeStore.getState();
       const mod = s.keymap === 'macos' ? e.metaKey : e.ctrlKey;
+      const targetEl = e.target as HTMLElement | null;
+      const inEditor = Boolean(targetEl?.closest('.monaco-editor'));
+      const inRegularInput =
+        (targetEl?.tagName === 'INPUT' || targetEl?.tagName === 'TEXTAREA') &&
+        !inEditor;
 
       if (mod && e.key.toLowerCase() === 'q') {
         e.preventDefault();
         s.setDialog({ quickLaunchOpen: !s.quickLaunchOpen });
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        void window.vsApi.dialog.openSolution().then((p) => {
+          if (p) void s.openSolution(p);
+        });
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         s.setDialog({ findInFilesOpen: true });
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'f' && !inRegularInput && !inEditor) {
+        e.preventDefault();
+        s.dispatchEditorCommand('find');
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
         e.preventDefault();
         s.setDialog({ newProjectOpen: true });
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
         void s.saveAllTabs();
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 's' && !inEditor) {
+        if (s.activeTabId) {
+          e.preventDefault();
+          void s.saveTab(s.activeTabId);
+        }
       } else if (mod && e.key.toLowerCase() === 'w') {
         if (s.activeTabId) {
           e.preventDefault();
@@ -121,6 +144,25 @@ export const App: React.FC = () => {
       } else if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         void s.buildSolution(e.altKey ? 'rebuild' : 'build');
+      } else if (e.shiftKey && e.altKey && e.key.toLowerCase() === 'f' && !inEditor) {
+        e.preventDefault();
+        s.dispatchEditorCommand('format');
+      } else if (mod && e.key === '/' && !inEditor) {
+        e.preventDefault();
+        s.dispatchEditorCommand('comment');
+      } else if ((e.ctrlKey || (s.keymap === 'macos' && e.metaKey)) && (e.key === '`' || e.code === 'Backquote')) {
+        e.preventDefault();
+        const isTerminalShowing = s.bottomOpen && s.bottomPanel === 'terminal';
+        s.setDock({ bottomOpen: !isTerminalShowing, bottomPanel: 'terminal' });
+      } else if (mod && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        s.setEditorZoom(s.editorZoom + 15);
+      } else if (mod && e.key === '-') {
+        e.preventDefault();
+        s.setEditorZoom(s.editorZoom - 15);
+      } else if (e.key === 'F9' && !inEditor) {
+        e.preventDefault();
+        s.dispatchEditorCommand('toggleBreakpoint');
       } else if ((e.key === 'F5' && !e.shiftKey) || (s.keymap === 'macos' && e.metaKey && e.key.toLowerCase() === 'r')) {
         e.preventDefault();
         if (s.debugState === 'paused') void s.continueDebugging();
@@ -145,6 +187,8 @@ export const App: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  const totalDiagCount = selectAllEffectiveDiagnostics(store).length;
 
   const leftTabs: Array<{ id: LeftPanelId; label: string; icon: string }> = [
     { id: 'solutionExplorer', label: 'Solution Explorer', icon: 'codicon-root-folder' },
@@ -202,14 +246,14 @@ export const App: React.FC = () => {
             {/* Visual Studio Left Auto-Hide Edge Rail */}
             <div
               style={{
-                width: 24,
+                width: 26,
                 background: 'var(--vs-bg-chrome)',
                 borderRight: '1px solid var(--vs-border)',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
-                paddingTop: 4,
-                gap: 2,
+                paddingTop: 6,
+                gap: 4,
                 flexShrink: 0,
               }}
             >
@@ -225,6 +269,7 @@ export const App: React.FC = () => {
                       padding: '8px 0',
                       background: active ? 'var(--vs-bg-panel)' : 'transparent',
                       border: 'none',
+                      borderRadius: 5,
                       borderLeft: active ? '2px solid var(--vs-accent)' : '2px solid transparent',
                       color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
                       cursor: 'pointer',
@@ -277,32 +322,37 @@ export const App: React.FC = () => {
                   style={{
                     display: 'flex',
                     borderTop: '1px solid var(--vs-border)',
-                    height: 24,
-                    background: 'var(--vs-bg-panel)',
+                    height: 26,
+                    padding: '2px 4px 0',
+                    gap: 2,
+                    background: 'var(--vs-bg-chrome)',
                   }}
                 >
-                  {leftTabs.map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => store.setDock({ leftPanel: t.id })}
-                      style={{
-                        flex: 1,
-                        border: 'none',
-                        borderRight: '1px solid var(--vs-border-subtle)',
-                        borderBottom: store.leftPanel === t.id ? '2px solid var(--vs-accent)' : '2px solid transparent',
-                        cursor: 'pointer',
-                        background: store.leftPanel === t.id ? 'var(--vs-bg)' : 'transparent',
-                        color: store.leftPanel === t.id ? 'var(--vs-fg-bright)' : 'var(--vs-fg)',
-                        fontSize: 11,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        padding: '0 4px',
-                      }}
-                    >
-                      {t.label}
-                    </button>
-                  ))}
+                  {leftTabs.map((t) => {
+                    const active = store.leftPanel === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => store.setDock({ leftPanel: t.id })}
+                        style={{
+                          flex: 1,
+                          border: 'none',
+                          borderRadius: '4px 4px 0 0',
+                          borderBottom: active ? '2px solid var(--vs-accent)' : '2px solid transparent',
+                          cursor: 'pointer',
+                          background: active ? 'var(--vs-bg-panel)' : 'transparent',
+                          color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
+                          fontSize: 11,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          padding: '0 4px',
+                        }}
+                      >
+                        {t.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -351,19 +401,22 @@ export const App: React.FC = () => {
                       <DebugBottomPanel tab={store.bottomPanel} />
                     )}
                   </div>
-                  {/* Bottom Tool Window Tabs Strip (Visual Studio style at bottom!) */}
+                  {/* Bottom Tool Window Tabs Strip */}
                   <div
                     style={{
                       display: 'flex',
                       alignItems: 'center',
-                      background: 'var(--vs-bg-panel)',
+                      background: 'var(--vs-bg-chrome)',
                       borderTop: '1px solid var(--vs-border)',
-                      height: 24,
+                      height: 26,
+                      padding: '0 4px',
+                      gap: 2,
                       overflowX: 'auto',
                     }}
                   >
                     {bottomTabs.map((t) => {
                       const active = store.bottomPanel === t.id;
+                      const showCount = t.id === 'errorList' && totalDiagCount > 0;
                       return (
                         <button
                           key={t.id}
@@ -373,19 +426,22 @@ export const App: React.FC = () => {
                             alignItems: 'center',
                             gap: 5,
                             padding: '0 10px',
-                            height: '100%',
+                            height: 22,
                             background: active ? 'var(--vs-bg)' : 'transparent',
                             border: 'none',
-                            borderRight: '1px solid var(--vs-border-subtle)',
+                            borderRadius: 4,
                             borderBottom: active ? '2px solid var(--vs-accent)' : '2px solid transparent',
-                            color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg)',
+                            color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
                             cursor: 'pointer',
                             fontSize: 11.5,
                             whiteSpace: 'nowrap',
                           }}
                         >
                           <span className={`codicon ${t.icon}`} style={{ fontSize: 12 }} />
-                          <span>{t.label}</span>
+                          <span>
+                            {t.label}
+                            {showCount ? ` (${totalDiagCount})` : ''}
+                          </span>
                         </button>
                       );
                     })}
@@ -395,13 +451,13 @@ export const App: React.FC = () => {
                 /* Bottom Auto-Hide Restore Bar */
                 <div
                   style={{
-                    height: 22,
+                    height: 24,
                     background: 'var(--vs-bg-chrome)',
                     borderTop: '1px solid var(--vs-border)',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 2,
-                    padding: '0 4px',
+                    gap: 3,
+                    padding: '0 6px',
                     overflowX: 'auto',
                   }}
                 >
@@ -413,10 +469,11 @@ export const App: React.FC = () => {
                         display: 'inline-flex',
                         alignItems: 'center',
                         gap: 4,
-                        padding: '0 8px',
-                        height: '100%',
+                        padding: '1px 8px',
+                        height: 20,
                         background: 'transparent',
                         border: 'none',
+                        borderRadius: 4,
                         color: 'var(--vs-fg-muted)',
                         cursor: 'pointer',
                         fontSize: 11,
@@ -424,7 +481,10 @@ export const App: React.FC = () => {
                       }}
                     >
                       <span className={`codicon ${t.icon}`} style={{ fontSize: 11 }} />
-                      <span>{t.label}</span>
+                      <span>
+                        {t.label}
+                        {t.id === 'errorList' && totalDiagCount > 0 ? ` (${totalDiagCount})` : ''}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -463,8 +523,10 @@ export const App: React.FC = () => {
                   style={{
                     display: 'flex',
                     borderTop: '1px solid var(--vs-border)',
-                    height: 24,
-                    background: 'var(--vs-bg-panel)',
+                    height: 26,
+                    padding: '2px 4px 0',
+                    gap: 2,
+                    background: 'var(--vs-bg-chrome)',
                   }}
                 >
                   <button
@@ -472,10 +534,11 @@ export const App: React.FC = () => {
                     style={{
                       flex: 1,
                       border: 'none',
+                      borderRadius: '4px 4px 0 0',
                       borderBottom: store.rightPanel === 'properties' ? '2px solid var(--vs-accent)' : '2px solid transparent',
                       cursor: 'pointer',
-                      background: store.rightPanel === 'properties' ? 'var(--vs-bg)' : 'transparent',
-                      color: 'var(--vs-fg)',
+                      background: store.rightPanel === 'properties' ? 'var(--vs-bg-panel)' : 'transparent',
+                      color: store.rightPanel === 'properties' ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
                       fontSize: 11.5,
                     }}
                   >
@@ -489,10 +552,11 @@ export const App: React.FC = () => {
                     style={{
                       flex: 1,
                       border: 'none',
+                      borderRadius: '4px 4px 0 0',
                       borderBottom: store.rightPanel === 'gitChanges' ? '2px solid var(--vs-accent)' : '2px solid transparent',
                       cursor: 'pointer',
-                      background: store.rightPanel === 'gitChanges' ? 'var(--vs-bg)' : 'transparent',
-                      color: 'var(--vs-fg)',
+                      background: store.rightPanel === 'gitChanges' ? 'var(--vs-bg-panel)' : 'transparent',
+                      color: store.rightPanel === 'gitChanges' ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
                       fontSize: 11.5,
                     }}
                   >
@@ -505,14 +569,14 @@ export const App: React.FC = () => {
             {/* Visual Studio Right Auto-Hide Edge Rail */}
             <div
               style={{
-                width: 24,
+                width: 26,
                 background: 'var(--vs-bg-chrome)',
                 borderLeft: '1px solid var(--vs-border)',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
-                paddingTop: 4,
-                gap: 2,
+                paddingTop: 6,
+                gap: 4,
                 flexShrink: 0,
               }}
             >
@@ -528,6 +592,7 @@ export const App: React.FC = () => {
                       padding: '8px 0',
                       background: active ? 'var(--vs-bg-panel)' : 'transparent',
                       border: 'none',
+                      borderRadius: 5,
                       borderRight: active ? '2px solid var(--vs-accent)' : '2px solid transparent',
                       color: active ? 'var(--vs-fg-bright)' : 'var(--vs-fg-muted)',
                       cursor: 'pointer',
@@ -573,30 +638,46 @@ const ToolWindowHeader: React.FC<{
 }> = ({ title, active, pinned, onTogglePin, onClose }) => (
   <div
     style={{
-      height: 22,
+      height: 28,
       background: active ? 'var(--vs-bg-header-active)' : 'var(--vs-bg-header-inactive)',
       color: active ? 'var(--vs-fg-header-active)' : 'var(--vs-fg)',
-      borderBottom: '1px solid var(--vs-border)',
+      borderBottom: '1px solid var(--vs-border-subtle)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '0 6px 0 8px',
+      padding: '0 8px 0 10px',
       fontSize: 11.5,
-      fontWeight: 500,
+      fontWeight: 600,
     }}
   >
-    <span>{title}</span>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      {active && (
+        <span
+          style={{
+            width: 3,
+            height: 13,
+            borderRadius: 2,
+            background: 'var(--vs-accent)',
+          }}
+        />
+      )}
+      <span>{title}</span>
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
       <button
         onClick={onTogglePin}
         title={pinned ? 'Auto Hide' : 'Dock / Pin'}
         style={{
           background: 'none',
           border: 'none',
+          borderRadius: 4,
           cursor: 'pointer',
           color: 'inherit',
           display: 'inline-flex',
-          padding: 1,
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: 20,
+          height: 20,
         }}
       >
         <span className={`codicon ${pinned ? 'codicon-pinned' : 'codicon-pin'}`} style={{ fontSize: 12 }} />
@@ -607,10 +688,14 @@ const ToolWindowHeader: React.FC<{
         style={{
           background: 'none',
           border: 'none',
+          borderRadius: 4,
           cursor: 'pointer',
           color: 'inherit',
           display: 'inline-flex',
-          padding: 1,
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: 20,
+          height: 20,
         }}
       >
         <span className="codicon codicon-close" style={{ fontSize: 12 }} />
