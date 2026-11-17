@@ -1,7 +1,8 @@
-import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
+import { ChildProcessWithoutNullStreams } from 'node:child_process';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import { getAugmentedEnv } from './dotnetService';
+import { spawnWithPty } from './ptyHelper';
 
 interface TerminalSession {
   id: string;
@@ -27,15 +28,14 @@ export class TerminalManager {
           ? '/bin/bash'
           : '/bin/sh';
 
-    const args = defaultShell.endsWith('zsh') ? ['-i'] : ['-i'];
-    const proc = spawn(defaultShell, args, {
+    const args = ['-i'];
+    const { proc } = spawnWithPty(defaultShell, args, {
       cwd: fsSync.existsSync(cwd) ? cwd : os.homedir(),
       env: {
         ...getAugmentedEnv(),
         TERM: 'xterm-256color',
         PS1: process.platform === 'darwin' ? '%n@%m %1~ %# ' : '\\u@\\h:\\w\\$ ',
       },
-      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     proc.stdout.on('data', (chunk: Buffer) => onData(chunk.toString('utf-8')));

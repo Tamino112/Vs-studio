@@ -62,7 +62,10 @@ describe('C# Built-in IntelliSense', () => {
 
     expect(labels).toContain('WriteLine');
     expect(labels).toContain('ReadLine');
+    expect(labels).toContain('ReadKey');
     expect(labels).toContain('ForegroundColor');
+    expect(items.find((i) => i.label === 'ReadKey')?.insertText).toBe('ReadKey');
+    expect(items.find((i) => i.label === 'WriteLine')?.insertText).toBe('WriteLine');
     expect(labels).not.toContain('cw');
     expect(labels).not.toContain('ctor');
     expect(labels).not.toContain('async');

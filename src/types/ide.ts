@@ -142,6 +142,7 @@ export interface ConsoleSessionInfo {
   exePath: string;
   command: string;
   pid?: number;
+  isPty?: boolean;
   running: boolean;
   exitCode?: number | null;
 }

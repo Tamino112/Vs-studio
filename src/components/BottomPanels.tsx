@@ -333,7 +333,9 @@ export const TerminalPanel: React.FC = () => {
     const unsubData = window.vsApi.on('terminal:data', (payload) => {
       const p = payload as { id: string; data: string };
       if (p.id === termId) {
-        setTermOutput((prev) => (prev + p.data).slice(-25000));
+        // eslint-disable-next-line no-control-regex
+        const clean = p.data.replace(/\r\n/g, '\n').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+        setTermOutput((prev) => (prev + clean).slice(-25000));
       }
     });
     return () => {

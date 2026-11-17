@@ -64,6 +64,7 @@ let currentConsoleSnapshot: {
     exePath: string;
     command: string;
     pid?: number;
+    isPty?: boolean;
     running: boolean;
     exitCode?: number | null;
   } | null;
@@ -532,7 +533,9 @@ function registerIpc(): void {
     debugManager.evaluate(expr, frameId),
   );
   ipcMain.handle('debug:sendInput', (_e, text: string) => {
-    currentConsoleSnapshot.output = (currentConsoleSnapshot.output + text).slice(-100000);
+    if (!currentConsoleSnapshot.session?.isPty) {
+      currentConsoleSnapshot.output = (currentConsoleSnapshot.output + text).slice(-100000);
+    }
     debugManager.sendInput(text);
   });
 

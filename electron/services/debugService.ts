@@ -3,6 +3,7 @@ import path from 'node:path';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import { getAugmentedEnv, getDotnetBin } from './dotnetService';
+import { findPython3Binary, spawnWithPty } from './ptyHelper';
 
 export interface DebugVariable {
   name: string;
@@ -33,6 +34,7 @@ export interface ConsoleSessionMeta {
   exePath: string;
   command: string;
   pid?: number;
+  isPty?: boolean;
 }
 
 export interface ConsoleExitInfo {
@@ -173,11 +175,8 @@ export class DotnetDebugManager {
     this.callbacks?.onStateChange('running');
     this.callbacks?.onOutput(`[Run] ${displayCmd}`);
 
-    this.runProc = spawn(dotnetBin, cmdArgs, {
-      cwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const spawned = spawnWithPty(dotnetBin, cmdArgs, { cwd, env });
+    this.runProc = spawned.proc;
     this.currentPid = this.runProc.pid;
 
     this.callbacks?.onConsoleStart?.({
@@ -187,6 +186,7 @@ export class DotnetDebugManager {
       exePath: dllPath,
       command: displayCmd,
       pid: this.runProc.pid,
+      isPty: spawned.isPty,
     });
 
     const handle = (buf: Buffer) => {
@@ -283,6 +283,7 @@ export class DotnetDebugManager {
       exePath: dllPath,
       command: dllPath,
       pid: this.dapProc.pid,
+      isPty: Boolean(findPython3Binary()),
     });
 
     this.dapProc.stdout.on('data', (chunk: Buffer) => this.handleDapData(chunk));
@@ -469,10 +470,9 @@ export class DotnetDebugManager {
         if (v === null) delete mergedEnv[k];
         else mergedEnv[k] = String(v);
       }
-      const proc = spawn(cmdArgs[0], cmdArgs.slice(1), {
+      const { proc } = spawnWithPty(cmdArgs[0], cmdArgs.slice(1), {
         cwd,
         env: mergedEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.runProc = proc;
       this.currentPid = proc.pid;

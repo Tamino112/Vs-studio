@@ -99,6 +99,78 @@ describe('Debug Console & Terminal Launch', () => {
     });
   });
 
+  it('provides a real PTY and delivers a single keypress without Enter (Console.ReadKey semantics) with exact exit code', async () => {
+    const projDir = path.join(tmpDir, 'ReadKeyApp');
+    const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');
+    await fs.mkdir(outDir, { recursive: true });
+    const csprojPath = path.join(projDir, 'ReadKeyApp.csproj');
+    const dllPath = path.join(outDir, 'ReadKeyApp.dll');
+
+    await fs.writeFile(csprojPath, '<Project />', 'utf-8');
+    await fs.writeFile(
+      dllPath,
+      `
+      process.stdout.write('Hallo');
+      if (!process.stdin.isTTY) {
+        console.error('NOT_TTY');
+        process.exit(99);
+      }
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.once('data', (chunk) => {
+        process.stdin.setRawMode(false);
+        process.stdout.write('|KEY=' + chunk.toString('utf8'));
+        process.exit(7);
+      });
+      `,
+      'utf-8',
+    );
+
+    const mgr = new DotnetDebugManager();
+    const rawChunks: string[] = [];
+    let startMeta: ConsoleSessionMeta | null = null;
+    let exitInfo: ConsoleExitInfo | null = null;
+    let sentKey = false;
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for ReadKey PTY test')), 5000);
+      mgr.setCallbacks({
+        onOutput: () => {},
+        onStateChange: () => {},
+        onStopped: () => {},
+        onConsoleStart: (meta) => {
+          startMeta = meta;
+        },
+        onConsoleData: (chunk) => {
+          rawChunks.push(chunk);
+          if (!sentKey && rawChunks.join('').includes('Hallo')) {
+            sentKey = true;
+            // Send single character 'K' with NO newline, just like Console.ReadKey()
+            mgr.sendInput('K');
+          }
+        },
+        onConsoleExit: (info) => {
+          exitInfo = info;
+        },
+        onExited: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+      });
+
+      void mgr.startWithoutDebugging(csprojPath, 'Debug', {
+        projectName: 'ReadKeyApp',
+        targetFramework: 'net10.0',
+        consoleMode: 'externalWindow',
+      });
+    });
+
+    expect(startMeta?.isPty).toBe(true);
+    expect(rawChunks.join('')).toContain('Hallo');
+    expect(rawChunks.join('')).toContain('|KEY=K');
+    expect(exitInfo?.code).toBe(7);
+  });
+
   it('handles DAP reverse runInTerminal request when debugging a console app', async () => {
     const projDir = path.join(tmpDir, 'DebugApp');
     const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');

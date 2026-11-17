@@ -6,10 +6,50 @@ interface ConsoleSnapshotPayload {
   output: string;
 }
 
-function stripAnsiControl(text: string): string {
-  // Strip ANSI escape codes & BEL/OSC sequences while preserving newlines and tabs
+function applyTerminalChunk(prev: string, rawChunk: string): string {
+  // Normalize CRLF and handle common terminal control sequences (\x1b[2J, \x1b[K, \b, \r)
+  let text = rawChunk.replace(/\r\n/g, '\n');
+
+  if (text.includes('\x1b[2J') || text.includes('\x1b[3J')) {
+    const parts = text.split(/\x1b\[[23]J/);
+    prev = '';
+    text = parts[parts.length - 1] ?? '';
+  }
+
+  // Strip OSC & non-cursor-erase CSI sequences
   // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\][^\x07]*\x07/g, '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  text = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+  // eslint-disable-next-line no-control-regex
+  text = text.replace(/\x1b\[(?![012]?K)[0-9;?]*[A-Za-z]/g, '');
+
+  let out = prev;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\x1b' && text.slice(i, i + 4).match(/^\x1b\[[012]?K/)) {
+      const m = /^\x1b\[([012]?)K/.exec(text.slice(i, i + 4))!;
+      i += m[0].length - 1;
+      if (m[1] === '2') {
+        const lastNl = out.lastIndexOf('\n');
+        out = lastNl === -1 ? '' : out.slice(0, lastNl + 1);
+      }
+      continue;
+    }
+    if (ch === '\x08' || ch === '\x7f') {
+      if (out.length > 0 && out[out.length - 1] !== '\n') {
+        out = out.slice(0, -1);
+      }
+      continue;
+    }
+    if (ch === '\r') {
+      // Carriage return rewinds to start of current line (unless already before \n, handled above)
+      const lastNl = out.lastIndexOf('\n');
+      out = lastNl === -1 ? '' : out.slice(0, lastNl + 1);
+      continue;
+    }
+    out += ch;
+  }
+
+  return out.length > 120000 ? out.slice(-120000) : out;
 }
 
 export const DebugConsoleWindow: React.FC = () => {
@@ -29,11 +69,12 @@ export const DebugConsoleWindow: React.FC = () => {
 
   useEffect(() => {
     document.title = 'Microsoft Visual Studio Debug Console';
+    bodyRef.current?.focus();
     if (!window.vsApi) return;
 
     void (window.vsApi.console.getSnapshot() as Promise<ConsoleSnapshotPayload>).then((snap) => {
       if (snap?.session) setSession(snap.session);
-      if (snap?.output) setOutput(stripAnsiControl(snap.output));
+      if (snap?.output) setOutput(applyTerminalChunk('', snap.output));
     });
 
     const unsubSession = window.vsApi.on('console:session', (payload) => {
@@ -41,12 +82,13 @@ export const DebugConsoleWindow: React.FC = () => {
       setSession(s);
       setOutput('');
       setInputBuffer('');
+      bodyRef.current?.focus();
     });
 
     const unsubData = window.vsApi.on('console:data', (chunk) => {
-      const str = stripAnsiControl(String(chunk || ''));
-      if (str) {
-        setOutput((prev) => (prev + str).slice(-120000));
+      const raw = String(chunk || '');
+      if (raw) {
+        setOutput((prev) => applyTerminalChunk(prev, raw));
       }
     });
 
@@ -102,9 +144,29 @@ export const DebugConsoleWindow: React.FC = () => {
     }
   }, [output, inputBuffer, session?.running]);
 
-  // Direct terminal keyboard capture (live stdin typing while running, press-any-key-to-close after exit)
+  // Direct terminal keyboard capture:
+  // - In PTY mode: forwards every keypress immediately (so Console.ReadKey / ReadKey(true) / Read / ReadLine all work natively)
+  // - After exit: press any non-modifier key to close window (Visual Studio behavior)
   useEffect(() => {
+    const mapSpecialKey = (key: string): string | null => {
+      switch (key) {
+        case 'Enter': return '\r';
+        case 'Backspace': return '\x7f';
+        case 'Tab': return '\t';
+        case 'Escape': return '\x1b';
+        case 'ArrowUp': return '\x1b[A';
+        case 'ArrowDown': return '\x1b[B';
+        case 'ArrowRight': return '\x1b[C';
+        case 'ArrowLeft': return '\x1b[D';
+        case 'Home': return '\x1b[H';
+        case 'End': return '\x1b[F';
+        case 'Delete': return '\x1b[3~';
+        default: return null;
+      }
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
       const activeTag = (e.target as HTMLElement | null)?.tagName;
       if (activeTag === 'INPUT' || activeTag === 'BUTTON') return;
 
@@ -121,26 +183,33 @@ export const DebugConsoleWindow: React.FC = () => {
 
       if (!cur?.running) return;
 
-      if ((e.ctrlKey && e.key.toLowerCase() === 'c') && !window.getSelection()?.toString()) {
+      if (e.ctrlKey && e.key.toLowerCase() === 'c' && !window.getSelection()?.toString()) {
         e.preventDefault();
-        void window.vsApi?.debug.stop();
+        if (cur.isPty) {
+          void window.vsApi?.debug.sendInput('\x03');
+        } else {
+          void window.vsApi?.debug.stop();
+        }
         return;
       }
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
         e.preventDefault();
         void navigator.clipboard?.readText().then((clip) => {
-          if (clip) {
-            const lines = clip.replace(/\r\n/g, '\n').split('\n');
-            if (lines.length > 1) {
-              const first = lines.shift() || '';
-              const toSend = inputBufferRef.current + first + '\n' + lines.join('\n');
-              setOutput((prev) => prev + toSend);
-              setInputBuffer('');
-              void window.vsApi?.debug.sendInput(toSend);
-            } else {
-              setInputBuffer((b) => b + clip);
-            }
+          if (!clip) return;
+          if (cur.isPty) {
+            void window.vsApi?.debug.sendInput(clip.replace(/\r?\n/g, '\r'));
+            return;
+          }
+          const lines = clip.replace(/\r\n/g, '\n').split('\n');
+          if (lines.length > 1) {
+            const first = lines.shift() || '';
+            const toSend = inputBufferRef.current + first + '\n' + lines.join('\n');
+            setOutput((prev) => prev + toSend);
+            setInputBuffer('');
+            void window.vsApi?.debug.sendInput(toSend);
+          } else {
+            setInputBuffer((b) => b + clip);
           }
         });
         return;
@@ -148,6 +217,21 @@ export const DebugConsoleWindow: React.FC = () => {
 
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
+      if (cur.isPty) {
+        const mapped = mapSpecialKey(e.key);
+        if (mapped !== null) {
+          e.preventDefault();
+          void window.vsApi?.debug.sendInput(mapped);
+          return;
+        }
+        if (e.key.length === 1) {
+          e.preventDefault();
+          void window.vsApi?.debug.sendInput(e.key);
+        }
+        return;
+      }
+
+      // Fallback when running over pipe without PTY
       if (e.key === 'Enter') {
         e.preventDefault();
         const line = inputBufferRef.current + '\n';
