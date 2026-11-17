@@ -412,7 +412,7 @@ export const TitleBarAndMenu: React.FC = () => {
         alignItems: 'center',
         justifyContent: 'space-between',
         paddingLeft: window.vsApi?.platform === 'darwin' ? 78 : 12,
-        paddingRight: 12,
+        paddingRight: window.vsApi?.platform === 'win32' ? 148 : 12,
         position: 'relative',
         zIndex: 200,
         flexShrink: 0,

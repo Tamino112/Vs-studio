@@ -264,7 +264,7 @@ export const DebugConsoleWindow: React.FC = () => {
           alignItems: 'center',
           justifyContent: 'space-between',
           paddingLeft: isMac ? 76 : 12,
-          paddingRight: 10,
+          paddingRight: window.vsApi?.platform === 'win32' ? 148 : 10,
           flexShrink: 0,
           fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
         }}

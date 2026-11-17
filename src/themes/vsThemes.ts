@@ -150,6 +150,12 @@ export function applyThemeToDom(themeId: VsThemeId): void {
   for (const [k, v] of Object.entries(theme.cssVars)) {
     root.style.setProperty(k, v);
   }
+  if (typeof window !== 'undefined') {
+    void window.vsApi?.window?.setTitleBarOverlay?.({
+      color: theme.cssVars['--vs-bg-titlebar'],
+      symbolColor: theme.cssVars['--vs-fg'],
+    });
+  }
 }
 
 export function registerMonacoThemes(monacoInst: typeof monaco): void {

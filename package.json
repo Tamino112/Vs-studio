@@ -1,7 +1,7 @@
 {
   "name": "vs-studio-community-macos",
   "version": "1.0.0",
-  "description": "Visual Studio Community for macOS — C# & .NET 10 IDE",
+  "description": "Visual Studio Community (Windows & macOS) — C# & .NET 10 IDE",
   "main": "dist-electron/main.js",
   "author": "Tamino112",
   "license": "MIT",
@@ -14,6 +14,9 @@
     "build": "npm run build:renderer && npm run build:electron",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "test": "vitest run",
+    "package:win": "npm run build && electron-builder --win --publish never",
+    "package:win:dir": "npm run build && electron-builder --win dir --publish never",
+    "package:win:portable": "npm run build && electron-builder --win portable --publish never",
     "package:mac": "npm run build && electron-builder --mac --publish never",
     "package:mac:dir": "npm run build && electron-builder --mac dir --publish never"
   },

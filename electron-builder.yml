@@ -8,6 +8,36 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - package.json
+extraResources:
+  - from: build
+    to: build
+    filter:
+      - icon.ico
+      - icon.png
+win:
+  icon: build/icon.ico
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Visual Studio Community
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  artifactName: "${productName}-Setup-${version}-${arch}.${ext}"
+portable:
+  artifactName: "${productName}-Portable-${version}-${arch}.${ext}"
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.svg

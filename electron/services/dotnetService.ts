@@ -150,8 +150,9 @@ async function resolveExecutable(name: string, candidates: string[]): Promise<st
     if (fsSync.existsSync(c)) return c;
   }
   try {
-    const { stdout } = await execFileAsync('which', [name], { env: getAugmentedEnv() });
-    const p = stdout.trim().split('\n')[0];
+    const lookupCmd = process.platform === 'win32' ? 'where' : 'which';
+    const { stdout } = await execFileAsync(lookupCmd, [name], { env: getAugmentedEnv() });
+    const p = stdout.trim().split(/\r?\n/)[0]?.trim();
     return p || null;
   } catch {
     return null;
@@ -160,17 +161,25 @@ async function resolveExecutable(name: string, candidates: string[]): Promise<st
 
 export async function getDotnetBin(): Promise<string> {
   const home = os.homedir();
-  const found = await resolveExecutable('dotnet', [
-    '/usr/local/share/dotnet/dotnet',
-    '/opt/homebrew/bin/dotnet',
-    path.join(home, '.dotnet', 'dotnet'),
-    '/usr/bin/dotnet',
-  ]);
+  const isWin = process.platform === 'win32';
+  const candidates = isWin
+    ? [
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'dotnet', 'dotnet.exe'),
+        path.join(home, '.dotnet', 'dotnet.exe'),
+      ]
+    : [
+        '/usr/local/share/dotnet/dotnet',
+        '/opt/homebrew/bin/dotnet',
+        path.join(home, '.dotnet', 'dotnet'),
+        '/usr/bin/dotnet',
+      ];
+  const found = await resolveExecutable('dotnet', candidates);
   return found || 'dotnet';
 }
 
 export async function detectEnvironment(): Promise<EnvironmentStatus> {
   const home = os.homedir();
+  const isWin = process.platform === 'win32';
   const env = getAugmentedEnv();
   const dotnetBin = await getDotnetBin();
 
@@ -195,19 +204,28 @@ export async function detectEnvironment(): Promise<EnvironmentStatus> {
     (dotnetVersion?.startsWith('10.') ?? false) ||
     dotnetSdks.some((s) => s.startsWith('10.'));
 
-  const csharpLsPath = await resolveExecutable('csharp-ls', [
-    path.join(home, '.dotnet', 'tools', 'csharp-ls'),
-    '/opt/homebrew/bin/csharp-ls',
-    '/usr/local/bin/csharp-ls',
-  ]);
+  const csharpLsPath = await resolveExecutable('csharp-ls', isWin
+    ? [path.join(home, '.dotnet', 'tools', 'csharp-ls.exe')]
+    : [
+        path.join(home, '.dotnet', 'tools', 'csharp-ls'),
+        '/opt/homebrew/bin/csharp-ls',
+        '/usr/local/bin/csharp-ls',
+      ]);
 
-  const netcoredbgPath = await resolveExecutable('netcoredbg', [
-    '/opt/homebrew/bin/netcoredbg',
-    '/usr/local/bin/netcoredbg',
-    path.join(home, '.dotnet', 'tools', 'netcoredbg'),
-  ]);
+  const netcoredbgPath = await resolveExecutable('netcoredbg', isWin
+    ? [
+        path.join(home, '.dotnet', 'tools', 'netcoredbg.exe'),
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'netcoredbg', 'netcoredbg.exe'),
+      ]
+    : [
+        '/opt/homebrew/bin/netcoredbg',
+        '/usr/local/bin/netcoredbg',
+        path.join(home, '.dotnet', 'tools', 'netcoredbg'),
+      ]);
 
-  const gitPath = await resolveExecutable('git', ['/opt/homebrew/bin/git', '/usr/bin/git']);
+  const gitPath = await resolveExecutable('git', isWin
+    ? [path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe')]
+    : ['/opt/homebrew/bin/git', '/usr/bin/git']);
 
   return {
     dotnetInstalled,

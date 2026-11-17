@@ -10,6 +10,8 @@ export const vsApi = {
     forceClose: () => ipcRenderer.invoke('window:forceClose'),
     closeAck: () => ipcRenderer.invoke('window:closeAck'),
     cancelClose: () => ipcRenderer.invoke('window:cancelClose'),
+    setTitleBarOverlay: (opts: { color: string; symbolColor: string }) =>
+      ipcRenderer.invoke('window:setTitleBarOverlay', opts),
   },
   dialog: {
     openSolution: (): Promise<string | null> => ipcRenderer.invoke('dialog:openSolution'),

@@ -95,6 +95,13 @@ function sendToDebugConsole(channel: string, payload: unknown): void {
   }
 }
 
+function getAppIconPath(): string {
+  const iconName = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'build', iconName)
+    : path.join(__dirname, '../build', iconName);
+}
+
 function openOrFocusDebugConsoleWindow(): void {
   if (debugConsoleWindow && !debugConsoleWindow.isDestroyed()) {
     if (debugConsoleWindow.isMinimized()) debugConsoleWindow.restore();
@@ -104,6 +111,7 @@ function openOrFocusDebugConsoleWindow(): void {
   }
 
   const isMac = process.platform === 'darwin';
+  const isWin = process.platform === 'win32';
   debugConsoleWindow = new BrowserWindow({
     width: 920,
     height: 540,
@@ -111,8 +119,19 @@ function openOrFocusDebugConsoleWindow(): void {
     minHeight: 300,
     backgroundColor: '#0C0C0C',
     title: 'Microsoft Visual Studio Debug Console',
+    icon: getAppIconPath(),
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
-    ...(isMac ? { trafficLightPosition: { x: 10, y: 10 } } : {}),
+    ...(isMac
+      ? { trafficLightPosition: { x: 10, y: 10 } }
+      : isWin
+        ? {
+            titleBarOverlay: {
+              color: '#1B1B1E',
+              symbolColor: '#CCCCCC',
+              height: 36,
+            },
+          }
+        : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -141,6 +160,7 @@ function openOrFocusDebugConsoleWindow(): void {
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin';
+  const isWin = process.platform === 'win32';
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 920,
@@ -148,8 +168,19 @@ function createWindow(): void {
     minHeight: 680,
     backgroundColor: '#1E1E1E',
     title: 'Microsoft Visual Studio Community',
+    icon: getAppIconPath(),
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
-    ...(isMac ? { trafficLightPosition: { x: 10, y: 10 } } : {}),
+    ...(isMac
+      ? { trafficLightPosition: { x: 10, y: 10 } }
+      : isWin
+        ? {
+            titleBarOverlay: {
+              color: '#2C2C32',
+              symbolColor: '#CCCCCC',
+              height: 36,
+            },
+          }
+        : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -313,6 +344,22 @@ function registerIpc(): void {
     allowMainWindowClose = true;
     mainWindow?.close();
   });
+  ipcMain.handle(
+    'window:setTitleBarOverlay',
+    (_e, opts: { color: string; symbolColor: string }) => {
+      if (process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
+        try {
+          mainWindow.setTitleBarOverlay({
+            color: opts.color,
+            symbolColor: opts.symbolColor,
+            height: 36,
+          });
+        } catch {
+          // ignore if overlay not supported
+        }
+      }
+    },
+  );
 
   // Dialogs
   ipcMain.handle('dialog:openSolution', async () => {
@@ -613,6 +660,9 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.tamino112.vsstudiocommunity');
+  }
   setupMacMenu();
   registerIpc();
   createWindow();

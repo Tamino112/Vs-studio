@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams } from 'node:child_process';
 import fsSync from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { getAugmentedEnv } from './dotnetService';
 import { spawnWithPty } from './ptyHelper';
 

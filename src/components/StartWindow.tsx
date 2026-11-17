@@ -60,7 +60,7 @@ export const StartWindow: React.FC = () => {
           alignItems: 'center',
           justifyContent: 'space-between',
           paddingLeft: window.vsApi?.platform === 'darwin' ? 84 : 16,
-          paddingRight: 16,
+          paddingRight: window.vsApi?.platform === 'win32' ? 148 : 16,
           background: 'var(--vs-bg-titlebar)',
           borderBottom: '1px solid var(--vs-border-subtle)',
         }}
@@ -68,7 +68,7 @@ export const StartWindow: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <VsLogoIcon size={17} />
           <span style={{ fontSize: 12, color: 'var(--vs-fg)', fontWeight: 500 }}>
-            Microsoft Visual Studio Community (macOS) — .NET 10
+            Microsoft Visual Studio Community ({window.vsApi?.platform === 'win32' ? 'Windows' : window.vsApi?.platform === 'darwin' ? 'macOS' : 'Desktop'}) — .NET 10
           </span>
         </div>
         <div className="vs-no-drag" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
