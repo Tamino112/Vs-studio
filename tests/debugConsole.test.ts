@@ -77,7 +77,7 @@ describe('Debug Console & Terminal Launch', () => {
           () =>
             reject(
               new Error(
-                `Timed out waiting for console process (isPty=${startMeta?.isPty}, sentName=${sentName}, plain=${JSON.stringify(toPlain(rawChunks))})`,
+                `Timed out waiting for console process (isPty=${startMeta?.isPty}, sentName=${sentName}, raw=${JSON.stringify(rawChunks.join(''))}, plain=${JSON.stringify(toPlain(rawChunks))})`,
               ),
             ),
           15000,
@@ -153,7 +153,8 @@ describe('Debug Console & Terminal Launch', () => {
           }
         }).join(',');
         console.error('NOT_TTY(' + fdInfo + ',outTTY=' + process.stdout.isTTY + ')');
-        process.exit(99);
+        setTimeout(() => process.exit(99), 60);
+        return;
       }
       process.stdin.setRawMode(true);
       process.stdin.resume();
@@ -178,7 +179,7 @@ describe('Debug Console & Terminal Launch', () => {
         () =>
           reject(
             new Error(
-              `Timed out waiting for ReadKey PTY test (isPty=${startMeta?.isPty}, sentKey=${sentKey}, plain=${JSON.stringify(toPlain(rawChunks))})`,
+              `Timed out waiting for ReadKey PTY test (isPty=${startMeta?.isPty}, sentKey=${sentKey}, raw=${JSON.stringify(rawChunks.join(''))}, plain=${JSON.stringify(toPlain(rawChunks))})`,
             ),
           ),
         15000,

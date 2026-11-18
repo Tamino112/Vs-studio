@@ -203,10 +203,12 @@ namespace VsConPtyBridge
         private const int STD_INPUT_HANDLE = -10;
         private const int STD_OUTPUT_HANDLE = -11;
         private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+        private const int STARTF_USESTDHANDLES = 0x00000100;
         private const uint INFINITE = 0xFFFFFFFF;
         private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
         private const int JobObjectExtendedLimitInformation = 9;
         private static readonly IntPtr PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = (IntPtr)0x00020016;
+        private static volatile bool childExited = false;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct COORD
@@ -610,6 +612,12 @@ namespace VsConPtyBridge
 
             STARTUPINFOEX si = new STARTUPINFOEX();
             si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+            // Required when vs-conpty is launched with redirected stdio pipes (Node stdio:['pipe',...]):
+            // otherwise NtCreateUserProcess duplicates the parent's pipe handles instead of binding ConPTY.
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = IntPtr.Zero;
+            si.StartupInfo.hStdOutput = IntPtr.Zero;
+            si.StartupInfo.hStdError = IntPtr.Zero;
             si.lpAttributeList = attrList;
 
             PROCESS_INFORMATION pi;
@@ -684,7 +692,10 @@ namespace VsConPtyBridge
                     int read = 0;
                     if (!ReadFile(stdIn, buf, buf.Length, out read, IntPtr.Zero) || read <= 0)
                     {
-                        try { TerminateProcess(pi.hProcess, 1); } catch { }
+                        if (!childExited)
+                        {
+                            try { TerminateProcess(pi.hProcess, 1); } catch { }
+                        }
                         break;
                     }
                     int offset = 0;
@@ -698,7 +709,13 @@ namespace VsConPtyBridge
                         }
                         int written = 0;
                         if (!WriteFile(inWrite, chunk, read - offset, out written, IntPtr.Zero) || written <= 0)
+                        {
+                            if (!childExited)
+                            {
+                                Console.Error.WriteLine("[vs-conpty] WriteFile(inWrite) failed: " + Marshal.GetLastWin32Error());
+                            }
                             return;
+                        }
                         offset += written;
                     }
                 }
@@ -707,9 +724,12 @@ namespace VsConPtyBridge
             inThread.Start();
 
             WaitForSingleObject(pi.hProcess, INFINITE);
+            childExited = true;
             uint exitCode = 0;
             GetExitCodeProcess(pi.hProcess, out exitCode);
 
+            // Give conhost a brief moment to flush remaining VT screen updates before tearing down ConPTY
+            Thread.Sleep(50);
             ClosePseudoConsole(hPC);
             outThread.Join(3000);
 
@@ -728,7 +748,7 @@ namespace VsConPtyBridge
 let cachedWinConptyExe: string | null | undefined = undefined;
 
 function findWindowsCscBinary(): string | null {
-  const winDir = process.env.WINDIR || 'C:\\Windows';
+  const winDir = process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows';
   const candidates = [
     path.join(winDir, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
     path.join(winDir, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe'),
