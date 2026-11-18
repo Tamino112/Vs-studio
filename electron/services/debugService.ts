@@ -159,6 +159,7 @@ export class DotnetDebugManager {
 
     const batContent = [
       '@echo off',
+      'chcp 65001 >nul',
       `title Microsoft Visual Studio Debug Console - ${projName}`,
       `cd /d "${cwd}"`,
       'set DOTNET_CLI_TELEMETRY_OPTOUT=1',
@@ -166,7 +167,8 @@ export class DotnetDebugManager {
       runCmd,
       'set EXIT_CODE=%ERRORLEVEL%',
       'echo.',
-      `echo ${dllPath} (process exited with code %EXIT_CODE%).`,
+      `set "DLL_PATH=${dllPath}"`,
+      'echo %DLL_PATH% (process exited with code %EXIT_CODE%).',
       'echo Press any key to close this window . . .',
       'pause >nul',
       `del "%~f0" >nul 2>&1`,
@@ -176,12 +178,17 @@ export class DotnetDebugManager {
 
     fsSync.writeFileSync(batPath, batContent, 'utf-8');
     this.callbacks?.onOutput(`[Run] Launching Windows Console for ${projName}...`);
-    const opener = spawn('cmd.exe', ['/c', 'start', `Microsoft Visual Studio Debug Console - ${projName}`, 'cmd.exe', '/c', batPath], {
-      cwd,
-      env: getAugmentedEnv(),
-      detached: true,
-      stdio: 'ignore',
-    });
+    const opener = spawn(
+      'cmd.exe',
+      ['/c', 'start', `"Microsoft Visual Studio Debug Console - ${projName}"`, 'cmd.exe', '/c', `"${batPath}"`],
+      {
+        cwd,
+        env: getAugmentedEnv(),
+        detached: true,
+        stdio: 'ignore',
+        windowsVerbatimArguments: true,
+      },
+    );
     opener.unref();
   }
 

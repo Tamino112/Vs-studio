@@ -406,11 +406,17 @@ export const ToolsOptionsDialog: React.FC = () => {
               value={consoleLaunchMode}
               onChange={(e) => setConsoleLaunchMode(e.target.value as 'externalWindow' | 'integratedTerminal' | 'macTerminal')}
             >
-              <option value="externalWindow">VS Debug Console Window (Visual Studio Default)</option>
-              <option value="integratedTerminal">Integrated Terminal (Bottom Dock)</option>
               <option value="macTerminal">
-                {window.vsApi?.platform === 'win32' ? 'Windows Console (Native Terminal)' : 'macOS Terminal.app'}
+                {window.vsApi?.platform === 'win32'
+                  ? 'Windows Console (Native Terminal - Recommended)'
+                  : 'macOS Terminal.app'}
               </option>
+              <option value="externalWindow">
+                {window.vsApi?.platform === 'win32'
+                  ? 'VS Debug Console Window (Piped)'
+                  : 'VS Debug Console Window (Visual Studio Default)'}
+              </option>
+              <option value="integratedTerminal">Integrated Terminal (Bottom Dock)</option>
             </select>
 
             <span>Auto-close console on exit:</span>

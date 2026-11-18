@@ -337,7 +337,9 @@ const defaultKeymap: KeymapMode =
 const savedKeymap = (localStorage.getItem('vs.keymap') as KeymapMode) || defaultKeymap;
 const savedTabLayout = (localStorage.getItem('vs.tabLayout') as TabLayoutPosition) || 'top';
 const savedColorize = localStorage.getItem('vs.colorizeTabs') !== 'false';
-const savedConsoleMode = (localStorage.getItem('vs.consoleMode') as ConsoleLaunchMode) || 'externalWindow';
+const defaultConsoleMode: ConsoleLaunchMode =
+  typeof window !== 'undefined' && window.vsApi?.platform === 'win32' ? 'macTerminal' : 'externalWindow';
+const savedConsoleMode = (localStorage.getItem('vs.consoleMode') as ConsoleLaunchMode) || defaultConsoleMode;
 const savedAutoCloseConsole = localStorage.getItem('vs.autoCloseConsole') === 'true';
 const savedFontSize = Number(localStorage.getItem('vs.fontSize')) || 13;
 const savedWordWrap = localStorage.getItem('vs.wordWrap') === 'true';
