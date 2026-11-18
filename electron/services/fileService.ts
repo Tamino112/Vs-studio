@@ -158,15 +158,22 @@ export async function getRecentSolutions(): Promise<RecentSolution[]> {
   }
 }
 
+function sameRecentPath(a: string, b: string): boolean {
+  if (process.platform === 'win32') {
+    return a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase();
+  }
+  return a === b;
+}
+
 export async function addRecentSolution(item: RecentSolution): Promise<RecentSolution[]> {
   const existing = await getRecentSolutions();
-  const prev = existing.find((x) => x.path === item.path);
+  const prev = existing.find((x) => sameRecentPath(x.path, item.path));
   const merged: RecentSolution = {
     ...item,
     pinned: prev?.pinned ?? item.pinned ?? false,
     lastOpened: new Date().toISOString(),
   };
-  const filtered = existing.filter((x) => x.path !== item.path);
+  const filtered = existing.filter((x) => !sameRecentPath(x.path, item.path));
   const next = [merged, ...filtered].slice(0, 20);
   await fs.mkdir(path.dirname(RECENT_STORE_PATH), { recursive: true });
   await fs.writeFile(RECENT_STORE_PATH, JSON.stringify(next, null, 2), 'utf-8');
@@ -176,7 +183,7 @@ export async function addRecentSolution(item: RecentSolution): Promise<RecentSol
 export async function togglePinRecentSolution(targetPath: string): Promise<RecentSolution[]> {
   const existing = await getRecentSolutions();
   const next = existing.map((x) =>
-    x.path === targetPath ? { ...x, pinned: !x.pinned } : x,
+    sameRecentPath(x.path, targetPath) ? { ...x, pinned: !x.pinned } : x,
   );
   await fs.mkdir(path.dirname(RECENT_STORE_PATH), { recursive: true });
   await fs.writeFile(RECENT_STORE_PATH, JSON.stringify(next, null, 2), 'utf-8');

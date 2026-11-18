@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useIdeStore } from '../store/useIdeStore';
 import { CsProjectInfo, FileNode } from '../types/ide';
 import { CSharpFileIcon, CSharpProjectIcon, NuGetIcon, SolutionIcon } from './VsIcons';
+import { isPathUnderDir, joinPath, pathDirName, pathsEqual } from '../utils/pathUtils';
 
 interface ContextMenuState {
   x: number;
@@ -55,8 +56,8 @@ export const SolutionExplorer: React.FC = () => {
     const nextExpanded: Record<string, boolean> = { ...expanded, __solution__: true };
     const findAndExpand = (nodes: FileNode[], targetPath: string): FileNode | null => {
       for (const n of nodes) {
-        if (n.path === targetPath) return n;
-        if (n.isDirectory && targetPath.startsWith(n.path) && n.children) {
+        if (pathsEqual(n.path, targetPath)) return n;
+        if (n.isDirectory && isPathUnderDir(targetPath, n.path) && n.children) {
           nextExpanded[`file:${n.path}`] = true;
           const found = findAndExpand(n.children, targetPath);
           if (found) return found;
@@ -66,7 +67,7 @@ export const SolutionExplorer: React.FC = () => {
     };
 
     for (const proj of solution.projects) {
-      if (activeTab.path.startsWith(proj.dir)) {
+      if (isPathUnderDir(activeTab.path, proj.dir)) {
         nextExpanded[`proj:${proj.id}`] = true;
         const found = findAndExpand(projectTrees[proj.id] || [], activeTab.path);
         if (found) setSelectedNode(found);
@@ -92,8 +93,8 @@ export const SolutionExplorer: React.FC = () => {
     const trimmed = renameValue.trim();
     setRenamingPath(null);
     if (!trimmed || trimmed === node.name) return;
-    const parentDir = node.path.slice(0, node.path.lastIndexOf('/'));
-    const newPath = `${parentDir}/${trimmed}`;
+    const parentDir = pathDirName(node.path);
+    const newPath = parentDir ? joinPath(parentDir, trimmed) : trimmed;
     await window.vsApi.fs.rename(node.path, newPath);
     useIdeStore.getState().renamePathInTabs(node.path, newPath);
     await refreshSolutionTrees();
@@ -179,8 +180,9 @@ export const SolutionExplorer: React.FC = () => {
       );
     }
 
-    const isCs = node.name.endsWith('.cs');
-    const isCsproj = node.name.endsWith('.csproj');
+    const lowerName = node.name.toLowerCase();
+    const isCs = lowerName.endsWith('.cs');
+    const isCsproj = lowerName.endsWith('.csproj');
     return (
       <div
         key={key}
@@ -250,7 +252,7 @@ export const SolutionExplorer: React.FC = () => {
     const depsOpen = isExpanded(`deps:${proj.id}`, false);
     const isStartup = solution?.startupProjectId === proj.id;
     const isSelected = selectedKey === key;
-    const files = (projectTrees[proj.id] || []).filter((f) => !f.name.endsWith('.csproj'));
+    const files = (projectTrees[proj.id] || []).filter((f) => !f.name.toLowerCase().endsWith('.csproj'));
     const kind = proj.sdk.includes('.Web') ? 'web' : proj.packages.some((p) => p.id.toLowerCase().includes('xunit') || p.id.toLowerCase().includes('nunit') || p.id.toLowerCase().includes('mstest')) ? 'test' : 'exe';
 
     return (

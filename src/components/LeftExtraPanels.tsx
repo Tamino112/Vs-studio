@@ -3,6 +3,7 @@ import { useIdeStore } from '../store/useIdeStore';
 import { FileNode } from '../types/ide';
 import { OutlineType, parseCSharpOutline } from '../utils/csharpOutline';
 import { CSharpProjectIcon } from './VsIcons';
+import { normalizePathKey } from '../utils/pathUtils';
 
 interface FileOutlineEntry {
   projectId: string;
@@ -43,7 +44,7 @@ export const ClassViewPanel: React.FC = () => {
       }
       for (const f of csFiles.slice(0, 80)) {
         try {
-          next[f.path] = await window.vsApi.fs.readFile(f.path);
+          next[normalizePathKey(f.path)] = await window.vsApi.fs.readFile(f.path);
         } catch {
           // ignore unreadable files
         }
@@ -58,12 +59,13 @@ export const ClassViewPanel: React.FC = () => {
 
   const entries = useMemo<FileOutlineEntry[]>(() => {
     if (!solution) return [];
-    const openByPath = new Map(openTabs.filter((t) => t.kind === 'code').map((t) => [t.path, t.content]));
+    const openByPath = new Map(openTabs.filter((t) => t.kind === 'code').map((t) => [normalizePathKey(t.path), t.content]));
     const result: FileOutlineEntry[] = [];
 
     const addProjFiles = (projectId: string, projectName: string, nodes: FileNode[]) => {
       for (const f of collectCsFiles(nodes)) {
-        const content = openByPath.get(f.path) ?? diskContents[f.path];
+        const key = normalizePathKey(f.path);
+        const content = openByPath.get(key) ?? diskContents[key];
         if (!content) continue;
         const types = parseCSharpOutline(content);
         if (types.length > 0) {

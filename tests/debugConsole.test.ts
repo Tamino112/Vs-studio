@@ -99,7 +99,7 @@ describe('Debug Console & Terminal Launch', () => {
     });
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it(
     'provides a real PTY and delivers a single keypress without Enter (Console.ReadKey semantics) with exact exit code',
     async () => {
     const projDir = path.join(tmpDir, 'ReadKeyApp');
@@ -121,8 +121,9 @@ describe('Debug Console & Terminal Launch', () => {
       process.stdin.resume();
       process.stdin.once('data', (chunk) => {
         process.stdin.setRawMode(false);
-        process.stdout.write('|KEY=' + chunk.toString('utf8'));
-        process.exit(7);
+        process.stdout.write('|KEY=' + chunk.toString('utf8'), () => {
+          setTimeout(() => process.exit(7), 30);
+        });
       });
       `,
       'utf-8',
@@ -135,7 +136,7 @@ describe('Debug Console & Terminal Launch', () => {
     let sentKey = false;
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timed out waiting for ReadKey PTY test')), 5000);
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for ReadKey PTY test')), 15000);
       mgr.setCallbacks({
         onOutput: () => {},
         onStateChange: () => {},
@@ -167,11 +168,13 @@ describe('Debug Console & Terminal Launch', () => {
       });
     });
 
-    expect(startMeta?.isPty).toBe(process.platform !== 'win32');
+    expect(startMeta?.isPty).toBe(true);
     expect(rawChunks.join('')).toContain('Hallo');
     expect(rawChunks.join('')).toContain('|KEY=K');
     expect(exitInfo?.code).toBe(7);
-  });
+  },
+    25000,
+  );
 
   it('restart (F5 while running) does not let the old process exit end the new session', async () => {
     const projDir = path.join(tmpDir, 'RestartApp');
@@ -355,11 +358,13 @@ describe('Debug Console & Terminal Launch', () => {
           syncBreakpoints: vi.fn(async () => {}),
         },
         dotnet: { build: dotnetBuild },
+        fs: { readFile: vi.fn(async () => 'Console.WriteLine("Hi");') },
+        lsp: { didOpen: vi.fn(async () => {}) },
       },
     });
 
     vi.resetModules();
-    const { useIdeStore } = await import('../src/store/useIdeStore');
+    const { useIdeStore, selectEffectiveDiagnosticsForFile } = await import('../src/store/useIdeStore');
 
     useIdeStore.setState({
       solution: {
@@ -421,15 +426,78 @@ describe('Debug Console & Terminal Launch', () => {
     expect(useIdeStore.getState().bottomPanel).toBe('terminal');
     expect(useIdeStore.getState().pendingTerminalCommand?.command).toContain('dotnet run --project "/tmp/MyConsole/MyConsole.csproj"');
 
-    // 3. Library + externalWindow => does NOT open debug console window
+    // 3. Exe + withDebugger + netcoredbg + macTerminal mode => still opens Debug Console for DAP integratedTerminal
+    consoleOpen.mockClear();
+    debugStart.mockClear();
+    useIdeStore.setState({
+      consoleLaunchMode: 'macTerminal',
+      debugState: 'stopped',
+      envStatus: {
+        dotnetInstalled: true,
+        dotnetVersion: '10.0.100',
+        dotnetSdks: ['10.0.100'],
+        hasNet10: true,
+        csharpLsInstalled: false,
+        csharpLsPath: null,
+        netcoredbgInstalled: true,
+        netcoredbgPath: '/usr/local/bin/netcoredbg',
+        gitInstalled: true,
+        platform: 'win32',
+      },
+    });
+    await useIdeStore.getState().startDebugging(true);
+    expect(consoleOpen).toHaveBeenCalledTimes(1);
+    expect(debugStart).toHaveBeenCalledTimes(1);
+
+    // 4. Library + externalWindow => does NOT open debug console window
     consoleOpen.mockClear();
     debugStartWithoutDebugging.mockClear();
     useIdeStore.setState((s) => ({
       consoleLaunchMode: 'externalWindow',
+      debugState: 'stopped',
       solution: s.solution ? { ...s.solution, startupProjectId: 'lib-1' } : null,
     }));
     await useIdeStore.getState().startDebugging(false);
     expect(consoleOpen).not.toHaveBeenCalled();
     expect(debugStartWithoutDebugging).toHaveBeenCalledTimes(1);
+
+    // 5. Windows backslash & drive-letter casing parity across tabs, breakpoints, diagnostics, rename, and close
+    await useIdeStore.getState().openFile('C:\\Repo\\App\\Program.cs');
+    expect(useIdeStore.getState().openTabs.some((t) => t.path === 'C:\\Repo\\App\\Program.cs')).toBe(true);
+
+    useIdeStore.getState().toggleBreakpoint('c:/repo/app/program.cs', 10);
+    expect(useIdeStore.getState().breakpoints).toHaveLength(1);
+    // Toggling the same line with uppercase backslash removes it rather than duplicating
+    useIdeStore.getState().toggleBreakpoint('C:\\Repo\\App\\Program.cs', 10);
+    expect(useIdeStore.getState().breakpoints).toHaveLength(0);
+    useIdeStore.getState().toggleBreakpoint('C:\\Repo\\App\\Program.cs', 10);
+
+    useIdeStore.getState().setLspDiagnostics('c:/REPO/app/program.cs', [
+      {
+        code: 'CS1002',
+        description: '; expected',
+        project: 'App',
+        file: 'c:/REPO/app/program.cs',
+        line: 1,
+        column: 25,
+        severity: 'error',
+        source: 'Roslyn',
+      },
+    ]);
+    const stBeforeRename = useIdeStore.getState();
+    const diags = selectEffectiveDiagnosticsForFile(stBeforeRename, 'C:\\Repo\\App\\Program.cs');
+    expect(diags).toHaveLength(1);
+    expect(diags[0].code).toBe('CS1002');
+
+    useIdeStore.getState().renamePathInTabs('c:/repo/app', 'C:\\Repo\\AppRenamed');
+    expect(useIdeStore.getState().openTabs.some((t) => t.path === 'C:\\Repo\\AppRenamed\\Program.cs')).toBe(true);
+    expect(useIdeStore.getState().breakpoints[0].file).toBe('C:\\Repo\\AppRenamed\\Program.cs');
+    expect(
+      selectEffectiveDiagnosticsForFile(useIdeStore.getState(), 'c:/repo/apprenamed/program.cs'),
+    ).toHaveLength(1);
+
+    useIdeStore.getState().closeTabsUnderPath('c:/repo/apprenamed');
+    expect(useIdeStore.getState().openTabs.some((t) => t.path.includes('AppRenamed'))).toBe(false);
+    expect(useIdeStore.getState().breakpoints).toHaveLength(0);
   });
 });

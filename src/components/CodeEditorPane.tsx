@@ -22,8 +22,9 @@ import {
 import { getBuiltInCSharpCodeActions } from '../utils/csharpDiagnostics';
 import { NuGetManagerTab } from './NuGetManagerTab';
 import { parseCSharpOutline } from '../utils/csharpOutline';
+import { isPathUnderDir, normalizePathKey, pathsEqual } from '../utils/pathUtils';
 
-// Configure Monaco workers locally (offline safe for macOS .app)
+// Configure Monaco workers locally (offline safe for macOS .app / Windows .exe)
 if (typeof self !== 'undefined' && !(self as unknown as { MonacoEnvironment?: unknown }).MonacoEnvironment) {
   (self as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
     getWorker(_: unknown, label: string) {
@@ -87,11 +88,11 @@ function getTabForModel(model: monaco.editor.ITextModel): OpenTab | undefined {
   const state = useIdeStore.getState();
   const mappedPath = modelPathRegistry.get(model.uri.toString());
   if (mappedPath) {
-    const found = state.openTabs.find((t) => t.kind === 'code' && t.path === mappedPath);
+    const found = state.openTabs.find((t) => t.kind === 'code' && pathsEqual(t.path, mappedPath));
     if (found) return found;
   }
   if (model.uri.scheme === 'file') {
-    const foundByUri = state.openTabs.find((t) => t.kind === 'code' && t.path === model.uri.fsPath);
+    const foundByUri = state.openTabs.find((t) => t.kind === 'code' && pathsEqual(t.path, model.uri.fsPath));
     if (foundByUri) return foundByUri;
   }
   return state.openTabs.find((t) => t.id === state.activeTabId);
@@ -443,9 +444,9 @@ export const CodeEditorPane: React.FC = () => {
 
   // Dispose cached Monaco models once a file is closed across all document groups
   useEffect(() => {
-    const openPaths = new Set(openTabs.filter((t) => t.kind === 'code').map((t) => t.path));
+    const openPathKeys = new Set(openTabs.filter((t) => t.kind === 'code').map((t) => normalizePathKey(t.path)));
     for (const [uriStr, filePath] of Array.from(modelPathRegistry.entries())) {
-      if (!openPaths.has(filePath)) {
+      if (!openPathKeys.has(normalizePathKey(filePath))) {
         const model = monaco.editor.getModel(monaco.Uri.parse(uriStr));
         if (model && !model.isAttachedToEditor()) {
           model.dispose();
@@ -502,6 +503,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     tabLayout,
     colorizeTabsByProject,
     editorZoom,
+    keymap,
     setTabLayout,
     setColorizeTabsByProject,
     setEditorZoom,
@@ -795,7 +797,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   useEffect(() => {
     const editor = editorRef.current;
     if (!pendingReveal || !editor || !activeTab || activeTab.kind !== 'code') return;
-    if (pendingReveal.filePath !== activeTab.path) return;
+    if (!pathsEqual(pendingReveal.filePath, activeTab.path)) return;
 
     editor.revealLineInCenter(pendingReveal.line);
     editor.setPosition({
@@ -892,7 +894,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
 
     const decos: monaco.editor.IModelDeltaDecoration[] = [];
 
-    for (const bp of breakpoints.filter((b) => b.file === activeTab.path)) {
+    for (const bp of breakpoints.filter((b) => pathsEqual(b.file, activeTab.path))) {
       decos.push({
         range: new monaco.Range(bp.line, 1, bp.line, 1),
         options: {
@@ -905,7 +907,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       });
     }
 
-    if (debugPausedLocation?.file === activeTab.path && debugPausedLocation.line) {
+    if (pathsEqual(debugPausedLocation?.file, activeTab.path) && debugPausedLocation?.line) {
       const ln = debugPausedLocation.line;
       decos.push({
         range: new monaco.Range(ln, 1, ln, 1),
@@ -1044,7 +1046,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   };
 
   const ownerProject = activeTab?.path
-    ? solution?.projects.find((p) => activeTab.path.startsWith(p.dir))
+    ? solution?.projects
+        .filter((p) => isPathUnderDir(activeTab.path, p.dir))
+        .sort((a, b) => b.dir.length - a.dir.length)[0]
     : undefined;
 
   const pinnedTabs = groupTabs.filter((t) => t.isPinned);
@@ -1075,8 +1079,9 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   const renderTabIcon = (tab: OpenTab) => {
     if (tab.kind === 'nuget') return <NuGetIcon size={13} />;
     if (tab.kind === 'diff') return <span className="codicon codicon-git-compare" style={{ fontSize: 13, color: '#75BEFF' }} />;
-    if (tab.title.endsWith('.cs')) return <CSharpFileIcon size={13} />;
-    if (tab.title.endsWith('.csproj')) return <CSharpProjectIcon size={13} />;
+    const lowerTitle = tab.title.toLowerCase();
+    if (lowerTitle.endsWith('.cs')) return <CSharpFileIcon size={13} />;
+    if (lowerTitle.endsWith('.csproj')) return <CSharpProjectIcon size={13} />;
     return <span className="codicon codicon-file" style={{ fontSize: 13 }} />;
   };
 
@@ -1606,7 +1611,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
       </div>
 
       <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--vs-fg-muted)' }}>
-        F9 / Margin: Breakpoint · Cmd+.: Quick Fix
+        F9 / Margin: Breakpoint · {keymap === 'windows' ? 'Ctrl+.' : 'Cmd+.'}: Quick Fix
       </span>
     </div>
   );
@@ -1636,7 +1641,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
             </div>
             <div style={{ fontSize: 12, textAlign: 'center', maxWidth: 420, lineHeight: 1.6 }}>
               Click a file in <strong>Solution Explorer</strong> to preview, double-click to keep open, or press{' '}
-              <code>⌘B</code> to Build Solution / <code>F5</code> to Start Debugging.
+              <code>{keymap === 'windows' ? 'Ctrl+Shift+B' : '⌘B'}</code> to Build Solution / <code>F5</code> to Start Debugging.
             </div>
           </div>
         )}

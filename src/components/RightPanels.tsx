@@ -232,9 +232,10 @@ export const PropertiesPanel: React.FC = () => {
     useIdeStore.setState({ solution: updated });
   };
 
-  const defaultBuildAction = selectedPropertyTarget.name.endsWith('.cs')
+  const lowerPropName = selectedPropertyTarget.name.toLowerCase();
+  const defaultBuildAction = lowerPropName.endsWith('.cs')
     ? 'C# compiler'
-    : selectedPropertyTarget.name.endsWith('.json') || selectedPropertyTarget.name.endsWith('.config')
+    : lowerPropName.endsWith('.json') || lowerPropName.endsWith('.config')
     ? 'Content'
     : 'None';
   const curFileProps = filePropOverrides[selectedPropertyTarget.path] || {};

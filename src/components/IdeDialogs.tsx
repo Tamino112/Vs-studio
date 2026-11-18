@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useIdeStore } from '../store/useIdeStore';
+import { isPathUnderDir, joinPath, pathsEqual } from '../utils/pathUtils';
 
 export const AddNewItemDialog: React.FC = () => {
   const { addNewItemTargetDir, setDialog, solution, refreshSolutionTrees, openFile } = useIdeStore();
@@ -19,21 +20,21 @@ export const AddNewItemDialog: React.FC = () => {
 
   if (!addNewItemTargetDir) return null;
 
-  // Longest matching project dir ("/src/App" must not own "/src/App.Tests")
+  // Longest matching project dir ("C:\src\App" must not own "C:\src\App.Tests")
   const ownerProj = solution?.projects
-    .filter((p) => addNewItemTargetDir === p.dir || addNewItemTargetDir.startsWith(p.dir + '/'))
+    .filter((p) => isPathUnderDir(addNewItemTargetDir, p.dir))
     .sort((a, b) => b.dir.length - a.dir.length)[0];
   // Like VS: RootNamespace + sub folders (Project/Models/Dto -> Project.Models.Dto)
   const nsPart = (v: string) => v.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^(\d)/, '_$1');
   const subFolders = ownerProj
-    ? addNewItemTargetDir.slice(ownerProj.dir.length).split('/').filter(Boolean).map(nsPart)
+    ? addNewItemTargetDir.slice(ownerProj.dir.length).split(/[/\\]/).filter(Boolean).map(nsPart)
     : [];
   const ns = ownerProj ? [nsPart(ownerProj.name), ...subFolders].join('.') : 'MyApp';
 
   const handleCreate = async () => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const fullPath = `${addNewItemTargetDir}/${trimmed}`;
+    const fullPath = joinPath(addNewItemTargetDir, trimmed);
 
     if (kind === 'folder') {
       await window.vsApi.fs.createDir(fullPath);
@@ -150,7 +151,7 @@ export const ProjectReferenceDialog: React.FC = () => {
             </div>
           ) : (
             otherProjects.map((p) => {
-              const hasRef = srcProj.projectReferences.some((r) => r.path === p.path);
+              const hasRef = srcProj.projectReferences.some((r) => pathsEqual(r.path, p.path));
               return (
                 <label
                   key={p.id}
@@ -413,7 +414,7 @@ export const ToolsOptionsDialog: React.FC = () => {
               </option>
               <option value="externalWindow">
                 {window.vsApi?.platform === 'win32'
-                  ? 'VS Debug Console Window (Piped)'
+                  ? 'VS Debug Console Window (ConPTY)'
                   : 'VS Debug Console Window (Visual Studio Default)'}
               </option>
               <option value="integratedTerminal">Integrated Terminal (Bottom Dock)</option>
@@ -476,7 +477,11 @@ export const ToolsOptionsDialog: React.FC = () => {
                   Detected {envStatus.dotnetVersion} ({envStatus.hasNet10 ? '.NET 10 Ready' : 'Install .NET 10 SDK recommended'})
                 </span>
               ) : (
-                <span style={{ color: 'var(--vs-warning)' }}>Not found (install .NET 10 SDK for macOS)</span>
+                <span style={{ color: 'var(--vs-warning)' }}>
+                  {window.vsApi?.platform === 'win32'
+                    ? 'Not found (install .NET 10 SDK for Windows)'
+                    : 'Not found (install .NET 10 SDK for macOS)'}
+                </span>
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -520,7 +525,9 @@ export const ToolsOptionsDialog: React.FC = () => {
                 <span style={{ color: 'var(--vs-success)' }}>Installed ({envStatus.netcoredbgPath})</span>
               ) : (
                 <span style={{ color: 'var(--vs-fg-muted)' }}>
-                  Optional: install via <code>brew install netcoredbg</code> for step-by-step breakpoints
+                  {window.vsApi?.platform === 'win32'
+                    ? <>Optional: install via <code>winget</code> / GitHub Releases (<code>netcoredbg.exe</code> on PATH) for step-by-step breakpoints</>
+                    : <>Optional: install via <code>brew install netcoredbg</code> for step-by-step breakpoints</>}
                 </span>
               )}
             </div>
@@ -557,8 +564,8 @@ export const CloneRepoDialog: React.FC = () => {
     setCloning(true);
     setErr(null);
     try {
-      const repoName = url.trim().split('/').pop()?.replace(/\.git$/, '') || 'repo';
-      const target = `${location.trim()}/${repoName}`;
+      const repoName = url.trim().split(/[/\\]/).pop()?.replace(/\.git$/i, '') || 'repo';
+      const target = joinPath(location.trim(), repoName);
       await window.vsApi.git.clone(url.trim(), target);
       setDialog({ cloneRepoOpen: false });
       await openSolution(target);

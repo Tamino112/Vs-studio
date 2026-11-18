@@ -35,12 +35,21 @@ export const DebugConsoleWindow: React.FC = () => {
     bodyRef.current?.focus();
     if (!window.vsApi) return;
 
+    let cancelled = false;
     void (window.vsApi.console.getSnapshot() as Promise<ConsoleSnapshotPayload>).then((snap) => {
+      if (cancelled) return;
       if (snap?.session) setSession(snap.session);
       if (snap?.output) {
         const restored = applyTerminalChunk('', snap.output);
         outputRef.current = restored;
         setOutput(restored);
+        const tailQueries = containsCursorQuery(snap.output.slice(-64));
+        if (tailQueries > 0 && snap.session?.running && snap.session?.isPty) {
+          const { row, col } = terminalCursorPosition(restored);
+          for (let q = 0; q < tailQueries; q++) {
+            void window.vsApi?.debug.sendInput(`\x1b[${row};${col}R`);
+          }
+        }
       }
     });
 
@@ -108,6 +117,7 @@ export const DebugConsoleWindow: React.FC = () => {
     window.addEventListener('storage', onStorage);
 
     return () => {
+      cancelled = true;
       unsubSession();
       unsubData();
       unsubExit();
@@ -183,7 +193,7 @@ export const DebugConsoleWindow: React.FC = () => {
           if (lines.length > 1) {
             const first = lines.shift() || '';
             const toSend = inputBufferRef.current + first + '\n' + lines.join('\n');
-            outputRef.current += toSend;
+            outputRef.current = applyTerminalChunk(outputRef.current, toSend);
             setOutput(outputRef.current);
             setInputBuffer('');
             void window.vsApi?.debug.sendInput(toSend);
@@ -214,7 +224,7 @@ export const DebugConsoleWindow: React.FC = () => {
       if (e.key === 'Enter') {
         e.preventDefault();
         const line = inputBufferRef.current + '\n';
-        outputRef.current += line;
+        outputRef.current = applyTerminalChunk(outputRef.current, line);
         setOutput(outputRef.current);
         setInputBuffer('');
         void window.vsApi?.debug.sendInput(line);
@@ -343,7 +353,7 @@ export const DebugConsoleWindow: React.FC = () => {
             <span className="codicon codicon-clear-all" style={{ fontSize: 12 }} /> Clear
           </button>
 
-          {!isMac && (
+          {!isMac && window.vsApi?.platform !== 'win32' && (
             <button
               onClick={() => void window.vsApi?.console.close()}
               style={{

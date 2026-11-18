@@ -422,9 +422,10 @@ function registerIpc(): void {
   // Solution & Project operations
   ipcMain.handle('solution:open', async (_e, targetPath: string) => {
     const sln = await parseSolution(targetPath);
-    const kind = targetPath.endsWith('.sln') || targetPath.endsWith('.slnx')
+    const lowerTarget = targetPath.toLowerCase();
+    const kind = lowerTarget.endsWith('.sln') || lowerTarget.endsWith('.slnx')
       ? 'sln'
-      : targetPath.endsWith('.csproj')
+      : lowerTarget.endsWith('.csproj')
       ? 'csproj'
       : 'folder';
     await addRecentSolution({

@@ -1,9 +1,30 @@
-import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, execFileSync, ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import { getAugmentedEnv, getDotnetBin } from './dotnetService';
-import { findPython3Binary, spawnWithPty } from './ptyHelper';
+import { isPtyAvailable, spawnDetachedNewConsole, spawnWithPty } from './ptyHelper';
+
+function killProcTree(p: ChildProcessWithoutNullStreams | null): void {
+  if (!p) return;
+  try {
+    if (process.platform === 'win32' && p.pid && p.exitCode === null && p.signalCode === null) {
+      try {
+        execFileSync('taskkill', ['/PID', String(p.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          timeout: 3000,
+          windowsHide: true,
+        });
+        return;
+      } catch {
+        // process may have exited already; fall back to p.kill()
+      }
+    }
+    p.kill();
+  } catch {
+    // ignore
+  }
+}
 
 export interface DebugVariable {
   name: string;
@@ -55,7 +76,9 @@ export interface DebugCallbacks {
 
 export class DotnetDebugManager {
   private runProc: ChildProcessWithoutNullStreams | null = null;
+  private runIsPty = false;
   private dapProc: ChildProcessWithoutNullStreams | null = null;
+  private externalWinPids = new Set<number>();
   private dapBuffer = Buffer.alloc(0);
   private seq = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -78,7 +101,17 @@ export class DotnetDebugManager {
     if (!chunk) return;
     this.callbacks?.onConsoleData?.(chunk);
 
-    const combined = this.lineRemainder + chunk;
+    const plainChunk = chunk
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;:<=>?]*[!"#$%&'()*+,\-./ ]*[@-~]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[()][0-9A-Za-z]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[=>78cMDE]/g, '');
+
+    const combined = this.lineRemainder + plainChunk;
     const parts = combined.split(/\r?\n/);
     this.lineRemainder = parts.pop() ?? '';
     for (const line of parts) {
@@ -149,41 +182,52 @@ export class DotnetDebugManager {
     const dotnetBin = await getDotnetBin();
     const cwd = path.dirname(params.csprojPath);
     const projName = params.projectName || path.basename(params.csprojPath, '.csproj');
+    const safeProjTitle = projName.replace(/[&|<>^%"\r\n]/g, ' ').trim() || 'App';
     const tfm = params.targetFramework || 'net10.0';
     const dllPath = path.join(cwd, 'bin', params.configuration, tfm, `${projName}.dll`);
-    const batPath = path.join(os.tmpdir(), `vs-console-${Date.now()}.cmd`);
+    const batPath = path.join(os.tmpdir(), `vs-console-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.cmd`);
+    const qBat = (v: string) => v.replace(/"/g, '').replace(/%/g, '%%');
 
     const runCmd = fsSync.existsSync(dllPath)
-      ? `"${dotnetBin}" "${dllPath}"`
-      : `"${dotnetBin}" run --project "${params.csprojPath}" -c "${params.configuration}" --no-build`;
+      ? `"${qBat(dotnetBin)}" "${qBat(dllPath)}"`
+      : `"${qBat(dotnetBin)}" run --project "${qBat(params.csprojPath)}" -c "${qBat(params.configuration)}" --no-build`;
 
     const batContent = [
       '@echo off',
+      'setlocal DisableDelayedExpansion',
       'chcp 65001 >nul',
-      `title Microsoft Visual Studio Debug Console - ${projName}`,
-      `cd /d "${cwd}"`,
+      `title Microsoft Visual Studio Debug Console - ${safeProjTitle}`,
+      `cd /d "${qBat(cwd)}"`,
       'set DOTNET_CLI_TELEMETRY_OPTOUT=1',
       'set DOTNET_NOLOGO=1',
+      'set DOTNET_CLI_FORCE_UTF8_ENCODING=1',
       runCmd,
       'set EXIT_CODE=%ERRORLEVEL%',
       'echo.',
-      `set "DLL_PATH=${dllPath}"`,
+      `set "DLL_PATH=${qBat(dllPath)}"`,
       'echo %DLL_PATH% (process exited with code %EXIT_CODE%).',
       'echo Press any key to close this window . . .',
       'pause >nul',
-      `del "%~f0" >nul 2>&1`,
+      'del "%~f0" >nul 2>&1',
       'exit /b %EXIT_CODE%',
       '',
     ].join('\r\n');
 
     fsSync.writeFileSync(batPath, batContent, 'utf-8');
     this.callbacks?.onOutput(`[Run] Launching Windows Console for ${projName}...`);
+    const env = getAugmentedEnv();
+    const winProc = spawnDetachedNewConsole(batPath, [], { cwd, env });
+    if (winProc) {
+      this.externalWinPids.add(winProc.pid);
+      return;
+    }
+
     const opener = spawn(
       'cmd.exe',
-      ['/c', 'start', `"Microsoft Visual Studio Debug Console - ${projName}"`, 'cmd.exe', '/c', `"${batPath}"`],
+      ['/c', 'start', `"Microsoft Visual Studio Debug Console - ${safeProjTitle}"`, 'cmd.exe', '/c', `"${batPath}"`],
       {
         cwd,
-        env: getAugmentedEnv(),
+        env,
         detached: true,
         stdio: 'ignore',
         windowsVerbatimArguments: true,
@@ -251,6 +295,7 @@ export class DotnetDebugManager {
 
     const spawned = spawnWithPty(dotnetBin, cmdArgs, { cwd, env });
     const proc = spawned.proc;
+    this.runIsPty = spawned.isPty;
     proc.stdout.setEncoding('utf8');
     proc.stderr.setEncoding('utf8');
     this.runProc = proc;
@@ -279,6 +324,7 @@ export class DotnetDebugManager {
       const exitCode = code ?? 0;
       const pid = proc.pid;
       this.runProc = null;
+      this.runIsPty = false;
       this.flushLineRemainder();
       this.callbacks?.onStateChange('stopped');
       this.callbacks?.onOutput(`[Process exited with code ${exitCode}]`);
@@ -295,6 +341,7 @@ export class DotnetDebugManager {
       this.callbacks?.onConsoleData?.(errMsg);
       this.callbacks?.onOutput(`[Run error: ${err.message}]`);
       this.runProc = null;
+      this.runIsPty = false;
       this.callbacks?.onStateChange('stopped');
       if (!this.consoleExitedEmitted) {
         this.consoleExitedEmitted = true;
@@ -314,8 +361,14 @@ export class DotnetDebugManager {
     consoleMode?: 'externalWindow' | 'integratedTerminal' | 'macTerminal';
   }): Promise<{ mode: 'dap' | 'run' }> {
     if (!params.netcoredbgPath) {
+      const hint =
+        process.platform === 'win32'
+          ? 'configure netcoredbg.exe on PATH or under %USERPROFILE%\\.dotnet\\tools'
+          : process.platform === 'darwin'
+            ? 'install via `brew install netcoredbg`'
+            : 'install netcoredbg on PATH';
       this.callbacks?.onOutput(
-        '[Debugger] netcoredbg not found on macOS PATH. Running without debugger (install via `brew install netcoredbg` for breakpoints & stepping).',
+        `[Debugger] netcoredbg not found on ${process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'system'} PATH. Running without debugger (${hint} for breakpoints & stepping).`,
       );
       await this.startWithoutDebugging(params.csprojPath, params.configuration, {
         projectName: params.projectName,
@@ -361,13 +414,7 @@ export class DotnetDebugManager {
       env: getAugmentedEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(params.netcoredbgPath),
-    });
-    dap.on('error', (err) => {
-      if (this.dapProc === dap) {
-        this.dapProc = null;
-        this.callbacks?.onOutput(`[Debugger] Failed to launch netcoredbg: ${err.message}`);
-        this.callbacks?.onStateChange('stopped');
-      }
+      windowsHide: true,
     });
     dap.stdin.on('error', () => {
       // ignore EPIPE if netcoredbg died
@@ -382,7 +429,7 @@ export class DotnetDebugManager {
       exePath: dllPath,
       command: dllPath,
       pid: dap.pid,
-      isPty: Boolean(findPython3Binary()),
+      isPty: isPtyAvailable(),
     });
 
     dap.stdout.on('data', (chunk: Buffer) => {
@@ -394,7 +441,15 @@ export class DotnetDebugManager {
     });
     dap.on('error', (err) => {
       if (this.dapProc !== dap) return;
+      const pid = this.currentPid;
+      this.dapProc = null;
       this.callbacks?.onOutput(`[Debugger] Failed to start netcoredbg: ${err.message}`);
+      this.callbacks?.onStateChange('stopped');
+      if (!this.consoleExitedEmitted) {
+        this.consoleExitedEmitted = true;
+        this.callbacks?.onConsoleExit?.({ code: 1, pid, exePath: this.currentExePath });
+      }
+      this.emitExited(1);
     });
     dap.on('close', (code) => {
       if (this.dapProc !== dap) return;
@@ -402,12 +457,9 @@ export class DotnetDebugManager {
       const pid = this.currentPid;
       this.dapProc = null;
       if (this.runProc) {
-        try {
-          this.runProc.kill();
-        } catch {
-          // ignore
-        }
+        killProcTree(this.runProc);
         this.runProc = null;
+        this.runIsPty = false;
       }
       for (const p of this.pending.values()) {
         p.reject(new Error('Debug adapter exited'));
@@ -423,7 +475,7 @@ export class DotnetDebugManager {
     });
 
     await this.sendDapRequest('initialize', {
-      clientID: 'vs-studio-macos',
+      clientID: 'vs-studio-desktop',
       adapterID: 'coreclr',
       linesStartAt1: true,
       columnsStartAt1: true,
@@ -523,7 +575,9 @@ export class DotnetDebugManager {
 
   sendInput(text: string): void {
     if (this.runProc && !this.runProc.killed) {
-      this.runProc.stdin.write(text);
+      const payload =
+        this.runIsPty && process.platform === 'win32' ? text.replace(/\r?\n/g, '\r') : text;
+      this.runProc.stdin.write(payload);
     }
   }
 
@@ -533,24 +587,44 @@ export class DotnetDebugManager {
     this.callbacks?.onExited(code);
   }
 
-  /** Synchronously kills every child process (used on app quit and before a new launch). */
-  private killProcessesNow(): void {
-    for (const p of [this.runProc, this.dapProc]) {
-      if (!p) continue;
+  private killExternalWinPids(): void {
+    if (process.platform !== 'win32' || this.externalWinPids.size === 0) {
+      this.externalWinPids.clear();
+      return;
+    }
+    for (const pid of this.externalWinPids) {
       try {
-        p.kill();
+        execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          stdio: 'ignore',
+          timeout: 3000,
+          windowsHide: true,
+        });
       } catch {
-        // ignore
+        // console window already closed
       }
     }
+    this.externalWinPids.clear();
+  }
+
+  /** Synchronously kills every child process (used on app quit and before a new launch). */
+  private killProcessesNow(): void {
+    killProcTree(this.runProc);
+    killProcTree(this.dapProc);
     this.runProc = null;
+    this.runIsPty = false;
     this.dapProc = null;
+    this.killExternalWinPids();
   }
 
   /** Called from app 'before-quit': no awaiting, just make sure nothing keeps running. */
   disposeSync(): void {
     this.sessionToken++;
-    this.killProcessesNow();
+    killProcTree(this.runProc);
+    killProcTree(this.dapProc);
+    this.runProc = null;
+    this.runIsPty = false;
+    this.dapProc = null;
+    this.killExternalWinPids();
     for (const p of this.pending.values()) {
       p.reject(new Error('Debug session disposed'));
     }
@@ -561,13 +635,10 @@ export class DotnetDebugManager {
     this.sessionToken++;
     const hadSession = Boolean(this.runProc || this.dapProc);
     if (this.runProc) {
-      try {
-        this.runProc.kill();
-      } catch {
-        // ignore
-      }
+      killProcTree(this.runProc);
       this.runProc = null;
     }
+    this.runIsPty = false;
     if (this.dapProc) {
       const dap = this.dapProc;
       try {
@@ -579,13 +650,10 @@ export class DotnetDebugManager {
       } catch {
         // ignore
       }
-      try {
-        dap.kill();
-      } catch {
-        // ignore
-      }
+      killProcTree(dap);
       if (this.dapProc === dap) this.dapProc = null;
     }
+    this.killExternalWinPids();
     for (const p of this.pending.values()) {
       p.reject(new Error('Debug session stopped'));
     }
@@ -650,10 +718,12 @@ export class DotnetDebugManager {
         if (v === null) delete mergedEnv[k];
         else mergedEnv[k] = String(v);
       }
-      const { proc } = spawnWithPty(cmdArgs[0], cmdArgs.slice(1), {
+      const spawned = spawnWithPty(cmdArgs[0], cmdArgs.slice(1), {
         cwd,
         env: mergedEnv,
       });
+      const proc = spawned.proc;
+      this.runIsPty = spawned.isPty;
       proc.stdout.setEncoding('utf8');
       proc.stderr.setEncoding('utf8');
       this.runProc = proc;
@@ -664,7 +734,10 @@ export class DotnetDebugManager {
       proc.stdout.on('data', onChunk);
       proc.stderr.on('data', onChunk);
       proc.on('close', () => {
-        if (this.runProc === proc) this.runProc = null;
+        if (this.runProc === proc) {
+          this.runProc = null;
+          this.runIsPty = false;
+        }
       });
       this.sendDapResponse(seq, command, true, { processId: proc.pid });
       return;

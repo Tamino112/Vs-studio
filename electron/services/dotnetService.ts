@@ -51,14 +51,24 @@ export interface TestCaseResult {
 
 export function getAugmentedEnv(): NodeJS.ProcessEnv {
   const home = os.homedir();
-  const extraPaths = [
-    '/opt/homebrew/bin',
-    '/opt/homebrew/sbin',
-    '/usr/local/bin',
-    '/usr/local/share/dotnet',
-    path.join(home, '.dotnet'),
-    path.join(home, '.dotnet', 'tools'),
-  ];
+  const isWin = process.platform === 'win32';
+  const extraPaths = isWin
+    ? [
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'dotnet'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'dotnet'),
+        path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'dotnet'),
+        path.join(home, '.dotnet'),
+        path.join(home, '.dotnet', 'tools'),
+        path.join(home, 'scoop', 'shims'),
+      ]
+    : [
+        '/opt/homebrew/bin',
+        '/opt/homebrew/sbin',
+        '/usr/local/bin',
+        '/usr/local/share/dotnet',
+        path.join(home, '.dotnet'),
+        path.join(home, '.dotnet', 'tools'),
+      ];
   const currentPath = process.env.PATH || '';
   const merged = [...extraPaths, ...currentPath.split(path.delimiter)]
     .filter(Boolean)
@@ -69,24 +79,43 @@ export function getAugmentedEnv(): NodeJS.ProcessEnv {
     PATH: merged,
     DOTNET_CLI_TELEMETRY_OPTOUT: '1',
     DOTNET_NOLOGO: '1',
+    DOTNET_CLI_FORCE_UTF8_ENCODING: '1',
   };
+  if (isWin) {
+    for (const k of Object.keys(env)) {
+      if (k.toUpperCase() === 'PATH' && k !== 'PATH') {
+        delete env[k];
+      }
+    }
+  }
   const dotnetRoot = resolveDotnetRoot(home);
   if (dotnetRoot) env.DOTNET_ROOT = dotnetRoot;
   else delete env.DOTNET_ROOT;
   return env;
 }
 
-/** Finds the real .NET install dir (official pkg, ~/.dotnet install script or Homebrew). */
+/** Finds the real .NET install dir (official installer / ~/.dotnet / Homebrew). */
 function resolveDotnetRoot(home: string): string | null {
-  if (process.env.DOTNET_ROOT && fsSync.existsSync(process.env.DOTNET_ROOT)) return process.env.DOTNET_ROOT;
-  const candidates = [
-    '/usr/local/share/dotnet',
-    path.join(home, '.dotnet'),
-    '/opt/homebrew/opt/dotnet/libexec',
-    '/usr/local/opt/dotnet/libexec',
-  ];
+  const isWin = process.platform === 'win32';
+  const binName = isWin ? 'dotnet.exe' : 'dotnet';
+  if (process.env.DOTNET_ROOT && fsSync.existsSync(path.join(process.env.DOTNET_ROOT, binName))) {
+    return process.env.DOTNET_ROOT;
+  }
+  const candidates = isWin
+    ? [
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'dotnet'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'dotnet'),
+        path.join(home, '.dotnet'),
+        path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'dotnet'),
+      ]
+    : [
+        '/usr/local/share/dotnet',
+        path.join(home, '.dotnet'),
+        '/opt/homebrew/opt/dotnet/libexec',
+        '/usr/local/opt/dotnet/libexec',
+      ];
   for (const c of candidates) {
-    if (fsSync.existsSync(path.join(c, 'dotnet'))) return c;
+    if (fsSync.existsSync(path.join(c, binName))) return c;
   }
   return null;
 }
@@ -116,7 +145,7 @@ function spawnDotnetLines(
   onLine: (line: string) => void,
   onClose: (code: number, output: string, error?: Error) => void,
 ): void {
-  const proc = spawn(bin, args, { cwd: opts.cwd, env: opts.env });
+  const proc = spawn(bin, args, { cwd: opts.cwd, env: opts.env, windowsHide: true });
   trackedProcs.add(proc);
   let output = '';
   const remainders = { out: '', err: '' };
@@ -150,9 +179,15 @@ async function resolveExecutable(name: string, candidates: string[]): Promise<st
     if (fsSync.existsSync(c)) return c;
   }
   try {
-    const lookupCmd = process.platform === 'win32' ? 'where' : 'which';
-    const { stdout } = await execFileAsync(lookupCmd, [name], { env: getAugmentedEnv() });
-    const p = stdout.trim().split(/\r?\n/)[0]?.trim();
+    const isWin = process.platform === 'win32';
+    const lookupCmd = isWin ? 'where' : 'which';
+    const { stdout } = await execFileAsync(lookupCmd, [name], { env: getAugmentedEnv(), windowsHide: true });
+    const lines = stdout
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const p = isWin ? lines.find((l) => /\.exe$/i.test(l)) || lines[0] : lines[0];
     return p || null;
   } catch {
     return null;
@@ -165,6 +200,8 @@ export async function getDotnetBin(): Promise<string> {
   const candidates = isWin
     ? [
         path.join(process.env.ProgramFiles || 'C:\\Program Files', 'dotnet', 'dotnet.exe'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'dotnet', 'dotnet.exe'),
+        path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'dotnet', 'dotnet.exe'),
         path.join(home, '.dotnet', 'dotnet.exe'),
       ]
     : [
@@ -180,6 +217,7 @@ export async function getDotnetBin(): Promise<string> {
 export async function detectEnvironment(): Promise<EnvironmentStatus> {
   const home = os.homedir();
   const isWin = process.platform === 'win32';
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
   const env = getAugmentedEnv();
   const dotnetBin = await getDotnetBin();
 
@@ -188,10 +226,10 @@ export async function detectEnvironment(): Promise<EnvironmentStatus> {
   let dotnetSdks: string[] = [];
 
   try {
-    const { stdout } = await execFileAsync(dotnetBin, ['--version'], { env });
+    const { stdout } = await execFileAsync(dotnetBin, ['--version'], { env, windowsHide: true });
     dotnetVersion = stdout.trim();
     dotnetInstalled = Boolean(dotnetVersion);
-    const sdksRes = await execFileAsync(dotnetBin, ['--list-sdks'], { env });
+    const sdksRes = await execFileAsync(dotnetBin, ['--list-sdks'], { env, windowsHide: true });
     dotnetSdks = sdksRes.stdout
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -205,7 +243,10 @@ export async function detectEnvironment(): Promise<EnvironmentStatus> {
     dotnetSdks.some((s) => s.startsWith('10.'));
 
   const csharpLsPath = await resolveExecutable('csharp-ls', isWin
-    ? [path.join(home, '.dotnet', 'tools', 'csharp-ls.exe')]
+    ? [
+        path.join(home, '.dotnet', 'tools', 'csharp-ls.exe'),
+        path.join(home, 'scoop', 'shims', 'csharp-ls.exe'),
+      ]
     : [
         path.join(home, '.dotnet', 'tools', 'csharp-ls'),
         '/opt/homebrew/bin/csharp-ls',
@@ -216,6 +257,9 @@ export async function detectEnvironment(): Promise<EnvironmentStatus> {
     ? [
         path.join(home, '.dotnet', 'tools', 'netcoredbg.exe'),
         path.join(process.env.ProgramFiles || 'C:\\Program Files', 'netcoredbg', 'netcoredbg.exe'),
+        path.join(localAppData, 'netcoredbg', 'netcoredbg.exe'),
+        path.join(home, 'scoop', 'shims', 'netcoredbg.exe'),
+        path.join(home, 'scoop', 'apps', 'netcoredbg', 'current', 'netcoredbg.exe'),
       ]
     : [
         '/opt/homebrew/bin/netcoredbg',
@@ -224,7 +268,12 @@ export async function detectEnvironment(): Promise<EnvironmentStatus> {
       ]);
 
   const gitPath = await resolveExecutable('git', isWin
-    ? [path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe')]
+    ? [
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'cmd', 'git.exe'),
+        path.join(localAppData, 'Programs', 'Git', 'cmd', 'git.exe'),
+        path.join(home, 'scoop', 'shims', 'git.exe'),
+      ]
     : ['/opt/homebrew/bin/git', '/usr/bin/git']);
 
   return {
@@ -458,7 +507,7 @@ export async function createSolutionWithProject(params: {
     if (useProgramMain && template === 'console') {
       args.push('--use-program-main');
     }
-    await execFileAsync(dotnetBin, args, { env });
+    await execFileAsync(dotnetBin, args, { env, windowsHide: true });
   } catch {
     // fallback below
   }
@@ -468,11 +517,17 @@ export async function createSolutionWithProject(params: {
 
   if (!fsSync.existsSync(slnPath)) {
     try {
-      await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir, '--format', 'sln'], { env });
+      await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir, '--format', 'sln'], {
+        env,
+        windowsHide: true,
+      });
     } catch {
       try {
         // SDKs before 9.0.200 do not know --format (and create .sln by default)
-        await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir], { env });
+        await execFileAsync(dotnetBin, ['new', 'sln', '-n', solutionName, '-o', solutionDir], {
+          env,
+          windowsHide: true,
+        });
       } catch {
         // fallback below
       }
@@ -481,7 +536,7 @@ export async function createSolutionWithProject(params: {
   let addedToSln = false;
   if (fsSync.existsSync(slnPath)) {
     try {
-      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
+      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env, windowsHide: true });
       addedToSln = true;
     } catch {
       try {
@@ -518,16 +573,17 @@ export async function addNewProjectToSolution(params: {
   try {
     const args = ['new', template, '-n', projectName, '-o', projectDir, '--framework', framework];
     if (useProgramMain && template === 'console') args.push('--use-program-main');
-    await execFileAsync(dotnetBin, args, { env });
+    await execFileAsync(dotnetBin, args, { env, windowsHide: true });
   } catch {
     // fallback below
   }
   if (!fsSync.existsSync(csprojPath)) {
     await scaffoldFallbackProject({ template, projectName, projectDir, framework, useProgramMain });
   }
-  if (slnPath.endsWith('.sln') || slnPath.endsWith('.slnx')) {
+  const lowerSln = slnPath.toLowerCase();
+  if (lowerSln.endsWith('.sln') || lowerSln.endsWith('.slnx')) {
     try {
-      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
+      await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env, windowsHide: true });
     } catch {
       await addProjectToSlnFile(slnPath, csprojPath);
     }
@@ -540,7 +596,7 @@ export async function addExistingProjectToSolution(slnPath: string, csprojPath: 
   const env = getAugmentedEnv();
   const dotnetBin = await getDotnetBin();
   try {
-    await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env });
+    await execFileAsync(dotnetBin, ['sln', slnPath, 'add', csprojPath], { env, windowsHide: true });
   } catch {
     await addProjectToSlnFile(slnPath, csprojPath);
   }
@@ -550,7 +606,7 @@ export async function addProjectReference(sourceCsproj: string, targetCsproj: st
   const env = getAugmentedEnv();
   const dotnetBin = await getDotnetBin();
   try {
-    await execFileAsync(dotnetBin, ['add', sourceCsproj, 'reference', targetCsproj], { env });
+    await execFileAsync(dotnetBin, ['add', sourceCsproj, 'reference', targetCsproj], { env, windowsHide: true });
   } catch {
     // MSBuild convention (what "dotnet add reference" writes): backslash separators
     const rel = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\//g, '\\');
@@ -566,7 +622,7 @@ export async function removeProjectReference(sourceCsproj: string, targetCsproj:
   const env = getAugmentedEnv();
   const dotnetBin = await getDotnetBin();
   try {
-    await execFileAsync(dotnetBin, ['remove', sourceCsproj, 'reference', targetCsproj], { env });
+    await execFileAsync(dotnetBin, ['remove', sourceCsproj, 'reference', targetCsproj], { env, windowsHide: true });
   } catch {
     const relWin = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\//g, '\\');
     const relUnix = path.relative(path.dirname(sourceCsproj), targetCsproj).replace(/\\/g, '/');

@@ -1,5 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { applyTerminalChunk, terminalSegments } from '../utils/terminalRender';
+import {
+  applyTerminalChunk,
+  containsCursorQuery,
+  terminalCursorPosition,
+  terminalSegments,
+} from '../utils/terminalRender';
 import { selectAllEffectiveDiagnostics, useIdeStore } from '../store/useIdeStore';
 import { OutputChannelName } from '../types/ide';
 
@@ -115,7 +120,12 @@ export const ErrorListPanel: React.FC = () => {
                   <tr
                     key={d.id}
                     onClick={() => setSelectedDiagId(d.id)}
-                    onDoubleClick={() => { if (d.file && !d.file.endsWith(".csproj") && !d.file.endsWith(".sln")) void openFile(d.file, d.line, d.column); }}
+                    onDoubleClick={() => {
+                      const lf = d.file.toLowerCase();
+                      if (d.file && !lf.endsWith('.csproj') && !lf.endsWith('.sln') && !lf.endsWith('.slnx')) {
+                        void openFile(d.file, d.line, d.column);
+                      }
+                    }}
                     style={{
                       borderBottom: '1px solid var(--vs-border-subtle)',
                       cursor: 'pointer',
@@ -308,40 +318,63 @@ export const OutputPanel: React.FC = () => {
   );
 };
 
+function formatTerminalCdAndRun(cwd: string, command: string): string {
+  if (window.vsApi?.platform === 'win32') {
+    return `cd /d "${cwd.replace(/"/g, '')}" && ${command}\n`;
+  }
+  return `cd "${cwd.replace(/"/g, '\\"')}" && ${command}\n`;
+}
+
 export const TerminalPanel: React.FC = () => {
   const { solution, pendingTerminalCommand, consumePendingTerminalCommand } = useIdeStore();
-  const [termOutput, setTermOutput] = useState<string>('Initializing macOS Developer Terminal...\n');
+  const initialBanner =
+    window.vsApi?.platform === 'win32'
+      ? 'Initializing Windows Developer Command Prompt...\n'
+      : 'Initializing macOS Developer Terminal...\n';
+  const [termOutput, setTermOutput] = useState<string>(initialBanner);
   const [cmdInput, setCmdInput] = useState('');
   const termId = 'main-terminal';
   const outRef = useRef<HTMLDivElement>(null);
+  const termOutputRef = useRef<string>(initialBanner);
   const terminalReadyRef = useRef(false);
   const lastCmdIdRef = useRef<number>(0);
 
   useEffect(() => {
     if (!window.vsApi) return;
+    let cancelled = false;
     terminalReadyRef.current = false;
     const cwd = solution?.dir || '.';
     void window.vsApi.terminal.create(termId, cwd).then(() => {
+      if (cancelled) return;
       terminalReadyRef.current = true;
       const pending = useIdeStore.getState().pendingTerminalCommand;
       if (pending && pending.id !== lastCmdIdRef.current) {
         lastCmdIdRef.current = pending.id;
-        setTermOutput((prev) => prev + `\n$ ${pending.command}\n`);
-        void window.vsApi.terminal.write(termId, `cd "${pending.cwd.replace(/"/g, '\\"')}" && ${pending.command}\n`);
+        const banner = applyTerminalChunk(termOutputRef.current, `\n$ ${pending.command}\n`);
+        termOutputRef.current = banner;
+        setTermOutput(banner);
+        void window.vsApi.terminal.write(termId, formatTerminalCdAndRun(pending.cwd, pending.command));
         useIdeStore.getState().consumePendingTerminalCommand();
       }
     });
     const unsubData = window.vsApi.on('terminal:data', (payload) => {
       const p = payload as { id: string; data: string };
       if (p.id === termId) {
-        // Same terminal emulation as the Debug Console (CR/LF split across chunks, \b, escapes)
-        setTermOutput((prev) => {
-          const next = applyTerminalChunk(prev, p.data);
-          return next.length > 25000 ? next.slice(-25000) : next;
-        });
+        // Same terminal emulation as the Debug Console (CR/LF split across chunks, \b, ConPTY VT sequences)
+        const next = applyTerminalChunk(termOutputRef.current, p.data);
+        termOutputRef.current = next;
+        setTermOutput(next);
+        const queries = containsCursorQuery(p.data);
+        if (queries > 0) {
+          const { row, col } = terminalCursorPosition(next);
+          for (let q = 0; q < queries; q++) {
+            void window.vsApi.terminal.write(termId, `\x1b[${row};${col}R`);
+          }
+        }
       }
     });
     return () => {
+      cancelled = true;
       terminalReadyRef.current = false;
       unsubData();
       void window.vsApi.terminal.kill(termId);
@@ -352,10 +385,12 @@ export const TerminalPanel: React.FC = () => {
     if (!pendingTerminalCommand || !terminalReadyRef.current) return;
     if (pendingTerminalCommand.id === lastCmdIdRef.current) return;
     lastCmdIdRef.current = pendingTerminalCommand.id;
-    setTermOutput((prev) => prev + `\n$ ${pendingTerminalCommand.command}\n`);
+    const next = applyTerminalChunk(termOutputRef.current, `\n$ ${pendingTerminalCommand.command}\n`);
+    termOutputRef.current = next;
+    setTermOutput(next);
     void window.vsApi.terminal.write(
       termId,
-      `cd "${pendingTerminalCommand.cwd.replace(/"/g, '\\"')}" && ${pendingTerminalCommand.command}\n`,
+      formatTerminalCdAndRun(pendingTerminalCommand.cwd, pendingTerminalCommand.command),
     );
     consumePendingTerminalCommand();
   }, [pendingTerminalCommand, consumePendingTerminalCommand]);
@@ -402,7 +437,9 @@ export const TerminalPanel: React.FC = () => {
           placeholder="Type command or program stdin (e.g. dotnet --info, dotnet build, git status)..."
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
-              setTermOutput((prev) => prev + cmdInput + '\n');
+              const next = applyTerminalChunk(termOutputRef.current, cmdInput + '\n');
+              termOutputRef.current = next;
+              setTermOutput(next);
               void window.vsApi.terminal.write(termId, cmdInput + '\n');
               setCmdInput('');
             } else if (e.key === 'c' && e.ctrlKey) {

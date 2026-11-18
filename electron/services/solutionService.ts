@@ -164,11 +164,14 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
 
   if (stat.isDirectory()) {
     const entries = await fs.readdir(absPath);
-    const slnFile = entries.find((e) => e.endsWith('.sln') || e.endsWith('.slnx'));
+    const slnFile = entries.find((e) => {
+      const l = e.toLowerCase();
+      return l.endsWith('.sln') || l.endsWith('.slnx');
+    });
     if (slnFile) {
       return parseSolution(path.join(absPath, slnFile));
     }
-    const csprojFiles = entries.filter((e) => e.endsWith('.csproj'));
+    const csprojFiles = entries.filter((e) => e.toLowerCase().endsWith('.csproj'));
     const projects: CsProjectInfo[] = [];
     for (const file of csprojFiles) {
       projects.push(await parseCsproj(path.join(absPath, file)));
@@ -180,13 +183,19 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
       format: 'folder',
       projects,
       folders: [],
-      startupProjectId: projects.find((p) => p.outputType === 'Exe' || p.sdk.includes('.Web'))?.id ?? projects[0]?.id ?? null,
+      startupProjectId:
+        projects.find((p) => {
+          const ot = p.outputType.toLowerCase();
+          return ot === 'exe' || ot === 'winexe' || p.sdk.includes('.Web');
+        })?.id ??
+        projects[0]?.id ??
+        null,
       configurations: ['Debug', 'Release'],
       platforms: ['Any CPU', 'arm64', 'x64'],
     };
   }
 
-  if (absPath.endsWith('.csproj')) {
+  if (absPath.toLowerCase().endsWith('.csproj')) {
     const proj = await parseCsproj(absPath);
     return {
       name: proj.name,
@@ -201,7 +210,7 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
     };
   }
 
-  if (absPath.endsWith('.slnx')) {
+  if (absPath.toLowerCase().endsWith('.slnx')) {
     const raw = await fs.readFile(absPath, 'utf-8');
     const parsed = xmlParser.parse(raw);
     const slnDir = path.dirname(absPath);
@@ -211,7 +220,7 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
     const collectProjects = async (projNodes: unknown[], folderId?: string) => {
       for (const node of toArray<Record<string, unknown>>(projNodes as Record<string, unknown>[])) {
         const rel = String(node['@_Path'] || '').replace(/\\/g, '/');
-        if (rel.endsWith('.csproj')) {
+        if (rel.toLowerCase().endsWith('.csproj')) {
           const full = path.resolve(slnDir, rel);
           if (fsSync.existsSync(full)) {
             const info = await parseCsproj(full);
@@ -241,7 +250,13 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
       format: 'slnx',
       projects,
       folders,
-      startupProjectId: projects.find((p) => p.outputType === 'Exe' || p.sdk.includes('.Web'))?.id ?? projects[0]?.id ?? null,
+      startupProjectId:
+        projects.find((p) => {
+          const ot = p.outputType.toLowerCase();
+          return ot === 'exe' || ot === 'winexe' || p.sdk.includes('.Web');
+        })?.id ??
+        projects[0]?.id ??
+        null,
       configurations: ['Debug', 'Release'],
       platforms: ['Any CPU', 'arm64', 'x64'],
     };
@@ -266,7 +281,7 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
 
     if (typeGuid === SOLUTION_FOLDER_TYPE) {
       folders.push({ id: projGuid, name: projName, projectIds: [] });
-    } else if (relPath.endsWith('.csproj')) {
+    } else if (relPath.toLowerCase().endsWith('.csproj')) {
       const fullPath = path.resolve(slnDir, relPath);
       if (fsSync.existsSync(fullPath)) {
         const info = await parseCsproj(fullPath, projGuid);
@@ -296,7 +311,10 @@ export async function parseSolution(targetPath: string): Promise<SolutionInfo> {
     projects,
     folders,
     startupProjectId:
-      projects.find((p) => p.outputType === 'Exe' || p.sdk.includes('.Web'))?.id ??
+      projects.find((p) => {
+        const ot = p.outputType.toLowerCase();
+        return ot === 'exe' || ot === 'winexe' || p.sdk.includes('.Web');
+      })?.id ??
       projects[0]?.id ??
       null,
     configurations: ['Debug', 'Release'],
@@ -349,7 +367,7 @@ export function createSlnContent(
 }
 
 export async function addProjectToSlnFile(slnPath: string, csprojPath: string): Promise<void> {
-  if (slnPath.endsWith('.slnx')) {
+  if (slnPath.toLowerCase().endsWith('.slnx')) {
     const raw = await fs.readFile(slnPath, 'utf-8');
     const rel = path.relative(path.dirname(slnPath), csprojPath).replace(/\\/g, '/');
     if (raw.includes(rel)) return;

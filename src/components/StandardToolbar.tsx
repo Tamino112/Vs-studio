@@ -152,7 +152,7 @@ export const StandardToolbar: React.FC = () => {
         style={{ height: 24, fontSize: 11.5 }}
       >
         <option value="Any CPU">Any CPU</option>
-        <option value="arm64">arm64 (Apple Silicon)</option>
+        <option value="arm64">{window.vsApi?.platform === 'darwin' ? 'arm64 (Apple Silicon)' : 'arm64'}</option>
         <option value="x64">x64</option>
       </select>
 

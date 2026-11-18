@@ -34,6 +34,8 @@ export class CSharpLspClient {
         cwd: rootDir,
         env: getAugmentedEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(csharpLsPath),
+        windowsHide: true,
       });
       this.proc = proc;
 

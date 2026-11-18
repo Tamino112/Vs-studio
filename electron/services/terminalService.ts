@@ -8,6 +8,7 @@ import { spawnWithPty } from './ptyHelper';
 interface TerminalSession {
   id: string;
   proc: ChildProcessWithoutNullStreams;
+  isPty: boolean;
 }
 
 export class TerminalManager {
@@ -31,8 +32,8 @@ export class TerminalManager {
           ? '/bin/bash'
           : '/bin/sh';
 
-    const args = isWin ? ['/K'] : ['-i'];
-    const { proc } = spawnWithPty(defaultShell, args, {
+    const args = isWin ? ['/K', '@chcp', '65001>nul'] : ['-i'];
+    const { proc, isPty } = spawnWithPty(defaultShell, args, {
       // '.' would resolve to the Electron process cwd ('/' when launched from Finder)
       cwd: cwd && cwd !== '.' && fsSync.existsSync(cwd) ? cwd : os.homedir(),
       env: {
@@ -67,13 +68,14 @@ export class TerminalManager {
       if (isCurrent()) onData(`\r\n[Terminal error: ${err.message}]\r\n`);
     });
 
-    this.sessions.set(id, { id, proc });
+    this.sessions.set(id, { id, proc, isPty });
   }
 
   write(id: string, data: string): void {
     const s = this.sessions.get(id);
     if (s && !s.proc.killed) {
-      s.proc.stdin.write(data);
+      const payload = s.isPty && process.platform === 'win32' ? data.replace(/\r?\n/g, '\r') : data;
+      s.proc.stdin.write(payload);
     }
   }
 

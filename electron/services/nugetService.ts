@@ -59,7 +59,7 @@ export async function installNugetPackage(
   if (version) args.push('--version', version);
 
   try {
-    const { stdout, stderr } = await execFileAsync(dotnetBin, args, { env });
+    const { stdout, stderr } = await execFileAsync(dotnetBin, args, { env, windowsHide: true });
     return { success: true, output: `${stdout}\n${stderr}`.trim() };
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
@@ -80,7 +80,7 @@ export async function removeNugetPackage(
     const { stdout, stderr } = await execFileAsync(
       dotnetBin,
       ['remove', csprojPath, 'package', packageId],
-      { env },
+      { env, windowsHide: true },
     );
     return { success: true, output: `${stdout}\n${stderr}`.trim() };
   } catch (err: unknown) {

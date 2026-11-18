@@ -126,7 +126,13 @@ export const StartWindow: React.FC = () => {
                 Visual Studio Community
               </h1>
               <div style={{ fontSize: 12.5, color: 'var(--vs-fg-muted)' }}>
-                C# &amp; .NET 10 Development Environment for macOS • Private Edition
+                C# &amp; .NET 10 Development Environment for{' '}
+                {window.vsApi?.platform === 'win32'
+                  ? 'Windows'
+                  : window.vsApi?.platform === 'darwin'
+                    ? 'macOS'
+                    : 'Desktop'}{' '}
+                • Private Edition
               </div>
             </div>
           </div>

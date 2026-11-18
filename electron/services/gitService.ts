@@ -35,6 +35,7 @@ async function runGit(cwd: string, args: string[], timeoutMs = 120000): Promise<
     env: { ...getAugmentedEnv(), GIT_TERMINAL_PROMPT: '0' },
     timeout: timeoutMs,
     maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true,
   });
   return stdout;
 }
@@ -172,16 +173,17 @@ export async function commitGit(repoDir: string, message: string): Promise<strin
 
 export async function getGitFileDiff(repoDir: string, relativePath: string, staged: boolean): Promise<{ original: string; modified: string }> {
   const root = await repoRoot(repoDir);
+  const relPosix = relativePath.replace(/\\/g, '/');
   let original = '';
   try {
-    original = await runGit(root, ['show', `HEAD:${relativePath}`]);
+    original = await runGit(root, ['show', `HEAD:${relPosix}`]);
   } catch {
     original = '';
   }
   let modified = '';
   if (staged) {
     try {
-      modified = await runGit(root, ['show', `:${relativePath}`]);
+      modified = await runGit(root, ['show', `:${relPosix}`]);
     } catch {
       modified = '';
     }
@@ -211,6 +213,7 @@ export async function cloneGitRepo(url: string, targetDir: string): Promise<void
   await execFileAsync('git', ['clone', '--', url, targetDir], {
     env: { ...getAugmentedEnv(), GIT_TERMINAL_PROMPT: '0' },
     maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true,
   });
 }
 

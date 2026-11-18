@@ -29,6 +29,13 @@ import {
 import { applyThemeToDom } from '../themes/vsThemes';
 import { extractTodoTasks } from '../utils/csharpOutline';
 import { analyzeCSharpCode } from '../utils/csharpDiagnostics';
+import {
+  isPathUnderDir,
+  normalizePathKey,
+  pathBaseName,
+  pathsEqual,
+  remapPathPrefix,
+} from '../utils/pathUtils';
 
 export type EditorCommandType =
   | 'undo'
@@ -52,11 +59,12 @@ const LIVE_COVERED_CODES = new Set([
 ]);
 
 export function selectEffectiveDiagnosticsForFile(state: Pick<IdeState, 'buildDiagnostics' | 'lspDiagnosticsByFile' | 'liveDiagnosticsByFile' | 'lspHasPublished' | 'lspStaleByFile'>, filePath: string): DiagnosticItem[] {
-  const buildForFile = state.buildDiagnostics.filter((d) => d.file === filePath);
-  const lspItems = state.lspDiagnosticsByFile[filePath] || [];
-  const liveItems = state.liveDiagnosticsByFile[filePath] || [];
-  const hasLsp = Boolean(state.lspHasPublished[filePath]);
-  const isStale = Boolean(state.lspStaleByFile[filePath]);
+  const normKey = normalizePathKey(filePath);
+  const buildForFile = state.buildDiagnostics.filter((d) => pathsEqual(d.file, filePath));
+  const lspItems = state.lspDiagnosticsByFile[normKey] ?? state.lspDiagnosticsByFile[filePath] ?? [];
+  const liveItems = state.liveDiagnosticsByFile[normKey] ?? state.liveDiagnosticsByFile[filePath] ?? [];
+  const hasLsp = Boolean(state.lspHasPublished[normKey] ?? state.lspHasPublished[filePath]);
+  const isStale = Boolean(state.lspStaleByFile[normKey] ?? state.lspStaleByFile[filePath]);
 
   let intelItems: DiagnosticItem[];
   if (!hasLsp || isStale) {
@@ -71,7 +79,7 @@ export function selectEffectiveDiagnosticsForFile(state: Pick<IdeState, 'buildDi
   const seen = new Set<string>();
   const combined: DiagnosticItem[] = [];
   for (const d of [...intelItems, ...buildForFile]) {
-    const key = `${d.file}:${d.line}:${d.code}`;
+    const key = `${normalizePathKey(d.file)}:${d.line}:${d.code}`;
     if (seen.has(key)) continue;
     seen.add(key);
     combined.push(d);
@@ -80,13 +88,17 @@ export function selectEffectiveDiagnosticsForFile(state: Pick<IdeState, 'buildDi
 }
 
 export function selectAllEffectiveDiagnostics(state: Pick<IdeState, 'buildDiagnostics' | 'lspDiagnosticsByFile' | 'liveDiagnosticsByFile' | 'lspHasPublished' | 'lspStaleByFile' | 'openTabs'>): DiagnosticItem[] {
-  const fileSet = new Set<string>([
-    ...state.buildDiagnostics.map((d) => d.file),
-    ...Object.keys(state.lspDiagnosticsByFile),
-    ...Object.keys(state.liveDiagnosticsByFile),
-  ]);
+  const canonicalByKey = new Map<string, string>();
+  const addFile = (f: string) => {
+    if (!f) return;
+    const k = normalizePathKey(f);
+    if (!canonicalByKey.has(k)) canonicalByKey.set(k, f);
+  };
+  for (const d of state.buildDiagnostics) addFile(d.file);
+  for (const f of Object.keys(state.lspDiagnosticsByFile)) addFile(f);
+  for (const f of Object.keys(state.liveDiagnosticsByFile)) addFile(f);
   const result: DiagnosticItem[] = [];
-  for (const file of fileSet) {
+  for (const file of canonicalByKey.values()) {
     result.push(...selectEffectiveDiagnosticsForFile(state, file));
   }
   return result;
@@ -108,7 +120,7 @@ function getProjectColor(solution: SolutionInfo | null, filePath: string): { pro
   // Longest matching project dir wins ("/src/App" must not claim "/src/App.Tests/…")
   let idx = -1;
   solution.projects.forEach((p, i) => {
-    if (filePath === p.dir || filePath.startsWith(p.dir.endsWith('/') ? p.dir : p.dir + '/')) {
+    if (isPathUnderDir(filePath, p.dir)) {
       if (idx === -1 || p.dir.length > solution.projects[idx].dir.length) idx = i;
     }
   });
@@ -523,7 +535,8 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     // Unsaved documents of the current solution: ask first (VS behaviour)
     if (!(await get().confirmCloseTabs(get().openTabs.map((t) => t.id)))) return;
     const sln = (await window.vsApi.solution.open(targetPath)) as SolutionInfo;
-    if (get().solution && get().solution?.path !== sln.path) {
+    const isDifferentSolution = Boolean(get().solution && !pathsEqual(get().solution?.path, sln.path));
+    if (isDifferentSolution) {
       void window.vsApi?.debug.stop();
     }
     set({
@@ -544,7 +557,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       lspHasPublished: {},
       lspStaleByFile: {},
       taskListItems: [],
-      ...(get().solution?.path !== sln.path
+      ...(!pathsEqual(get().solution?.path, sln.path)
         ? {
             debugState: 'stopped' as const,
             debugFrames: [],
@@ -585,7 +598,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     if (startup) {
       const tree = get().projectTrees[startup.id] || [];
       const programNode = tree.find((n) => !n.isDirectory && n.name.toLowerCase() === 'program.cs')
-        || tree.find((n) => !n.isDirectory && n.name.endsWith('.cs'));
+        || tree.find((n) => !n.isDirectory && n.name.toLowerCase().endsWith('.cs'));
       if (programNode) {
         await get().openFile(programNode.path);
       }
@@ -682,10 +695,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   openFile: async (filePath, line, column, options) => {
     const targetGroup = options?.groupId ?? get().activeGroupId ?? 0;
     const isPreview = Boolean(options?.preview);
-    const existing = get().openTabs.find((t) => t.kind === 'code' && t.path === filePath);
+    const existing = get().openTabs.find((t) => t.kind === 'code' && pathsEqual(t.path, filePath));
 
     if (!options?.skipHistory) {
-      get().recordNavigation(filePath, line ?? existing?.cursorLine ?? 1, column ?? existing?.cursorColumn ?? 1);
+      get().recordNavigation(existing?.path ?? filePath, line ?? existing?.cursorLine ?? 1, column ?? existing?.cursorColumn ?? 1);
     }
 
     if (existing) {
@@ -697,7 +710,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
         ...(line !== undefined
           ? {
               pendingReveal: {
-                filePath,
+                filePath: existing.path,
                 line,
                 column: column ?? 1,
                 nonce: Date.now() + Math.random(),
@@ -717,9 +730,9 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     }
 
     const content = await window.vsApi.fs.readFile(filePath);
-    const title = filePath.split(/[/\\]/).pop() || filePath;
+    const title = pathBaseName(filePath);
     const language = detectLanguage(filePath);
-    const id = `code:${filePath}`;
+    const id = `code:${normalizePathKey(filePath)}`;
     const projMeta = getProjectColor(get().solution, filePath);
     const liveDiags =
       language === 'csharp'
@@ -779,7 +792,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
           ? {
               liveDiagnosticsByFile: {
                 ...s.liveDiagnosticsByFile,
-                [filePath]: liveDiags,
+                [normalizePathKey(filePath)]: liveDiags,
               },
             }
           : {}),
@@ -828,7 +841,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   openDiffTab: (title, filePath, original, modified) => {
-    const id = `diff:${filePath}`;
+    const id = `diff:${normalizePathKey(filePath)}`;
     const existing = get().openTabs.find((t) => t.id === id);
     if (existing) {
       const grp = existing.groupId ?? 0;
@@ -872,6 +885,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       tab.kind === 'code' && tab.language === 'csharp'
         ? analyzeCSharpCode(tab.path, tab.projectName || get().solution?.name || 'Project', content)
         : undefined;
+    const diagKey = normalizePathKey(tab.path);
 
     set((s) => ({
       openTabs: s.openTabs.map((t) =>
@@ -883,11 +897,11 @@ export const useIdeStore = create<IdeState>((set, get) => ({
         ? {
             liveDiagnosticsByFile: {
               ...s.liveDiagnosticsByFile,
-              [tab.path]: liveDiags,
+              [diagKey]: liveDiags,
             },
             lspStaleByFile: {
               ...s.lspStaleByFile,
-              [tab.path]: true,
+              [diagKey]: true,
             },
           }
         : {}),
@@ -910,7 +924,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   recordNavigation: (filePath, line, column) => {
     set((s) => {
       const current = s.navHistory[s.navIndex];
-      if (current && current.filePath === filePath && Math.abs(current.line - line) <= 3) {
+      if (current && pathsEqual(current.filePath, filePath) && Math.abs(current.line - line) <= 3) {
         return {};
       }
       const sliced = s.navHistory.slice(0, s.navIndex + 1);
@@ -964,7 +978,8 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     if (tab.language === 'csharp') {
       void window.vsApi?.lsp.didSave(tab.path, tab.content);
     }
-    if (tab.path.endsWith('.csproj') || tab.path.endsWith('.sln') || tab.path.endsWith('.slnx')) {
+    const lowerTabPath = tab.path.toLowerCase();
+    if (lowerTabPath.endsWith('.csproj') || lowerTabPath.endsWith('.sln') || lowerTabPath.endsWith('.slnx')) {
       const sln = get().solution;
       if (sln) {
         const updated = (await window.vsApi.solution.open(sln.path)) as SolutionInfo;
@@ -1006,35 +1021,45 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   renamePathInTabs: (oldPath, newPath) => {
-    const remap = (p: string) =>
-      p === oldPath ? newPath : p.startsWith(oldPath + '/') ? newPath + p.slice(oldPath.length) : null;
     set((s) => {
       const idMap = new Map<string, string>();
       const openTabs = s.openTabs.map((t) => {
         if (t.kind !== 'code') return t;
-        const np = remap(t.path);
+        const np = remapPathPrefix(t.path, oldPath, newPath);
         if (!np) return t;
-        const id = `code:${np}`;
+        const id = `code:${normalizePathKey(np)}`;
         idMap.set(t.id, id);
         return {
           ...t,
           id,
           path: np,
-          title: np.split('/').pop() || np,
+          title: pathBaseName(np),
           language: detectLanguage(np),
           ...getProjectColor(s.solution, np),
         };
       });
       const mapId = (id: string | null) => (id && idMap.has(id) ? idMap.get(id)! : id);
       const breakpoints = s.breakpoints.map((b) => {
-        const np = remap(b.file);
-        return np ? { ...b, file: np, id: `${np}:${b.line}` } : b;
+        const np = remapPathPrefix(b.file, oldPath, newPath);
+        return np ? { ...b, file: np, id: `${normalizePathKey(np)}:${b.line}` } : b;
       });
+      const remapDiagRecord = <T,>(rec: Record<string, T>): Record<string, T> => {
+        const next: Record<string, T> = {};
+        for (const [k, v] of Object.entries(rec)) {
+          const np = remapPathPrefix(k, oldPath, newPath);
+          next[np ? normalizePathKey(np) : k] = v;
+        }
+        return next;
+      };
       return {
         openTabs,
         breakpoints,
         activeTabId: mapId(s.activeTabId),
         activeTabByGroup: { 0: mapId(s.activeTabByGroup[0] ?? null), 1: mapId(s.activeTabByGroup[1] ?? null) },
+        liveDiagnosticsByFile: remapDiagRecord(s.liveDiagnosticsByFile),
+        lspDiagnosticsByFile: remapDiagRecord(s.lspDiagnosticsByFile),
+        lspHasPublished: remapDiagRecord(s.lspHasPublished),
+        lspStaleByFile: remapDiagRecord(s.lspStaleByFile),
       };
     });
     void window.vsApi?.debug.syncBreakpoints(get().breakpoints);
@@ -1042,14 +1067,12 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
   closeTabsUnderPath: (deletedPath) => {
     const ids = get()
-      .openTabs.filter((t) => t.kind === 'code' && (t.path === deletedPath || t.path.startsWith(deletedPath + '/')))
+      .openTabs.filter((t) => t.kind === 'code' && isPathUnderDir(t.path, deletedPath))
       .map((t) => t.id);
     withCloseBypass(() => {
       for (const id of ids) get().closeTab(id);
     });
-    const breakpoints = get().breakpoints.filter(
-      (b) => !(b.file === deletedPath || b.file.startsWith(deletedPath + '/')),
-    );
+    const breakpoints = get().breakpoints.filter((b) => !isPathUnderDir(b.file, deletedPath));
     if (breakpoints.length !== get().breakpoints.length) {
       set({ breakpoints });
       void window.vsApi?.debug.syncBreakpoints(breakpoints);
@@ -1366,18 +1389,19 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   setActiveOutputChannel: (activeOutputChannel) => set({ activeOutputChannel }),
 
   setLspDiagnostics: (file, items) => {
+    const key = normalizePathKey(file);
     set((s) => ({
       lspDiagnosticsByFile: {
         ...s.lspDiagnosticsByFile,
-        [file]: items,
+        [key]: items,
       },
       lspHasPublished: {
         ...s.lspHasPublished,
-        [file]: true,
+        [key]: true,
       },
       lspStaleByFile: {
         ...s.lspStaleByFile,
-        [file]: false,
+        [key]: false,
       },
     }));
   },
@@ -1389,6 +1413,12 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     if (get().isBuilding) return false;
     set({ isBuilding: true });
     try {
+      // Release any running exe/dll or detached Windows console before MSBuild runs (prevents MSB3027 lock)
+      if (get().debugState !== 'stopped') {
+        await get().stopDebugging();
+      } else if (window.vsApi?.platform === 'win32') {
+        await window.vsApi?.debug?.stop?.();
+      }
       await get().saveAllTabs();
 
     const target = projectPath || (sln.format === 'sln' || sln.format === 'slnx' ? sln.path : sln.projects[0]?.path || sln.dir);
@@ -1487,8 +1517,8 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       statusText: withDebugger ? `Debugging ${startup.name}...` : `Running ${startup.name}...`,
     });
 
-    // Like Visual Studio on Windows, automatically open the Debug Console Terminal window for Console / Exe projects
-    if (isExeProject && consoleMode === 'externalWindow') {
+    // Like Visual Studio, open the Debug Console Window for externalWindow mode OR when netcoredbg runs DAP integratedTerminal
+    if (isExeProject && (consoleMode === 'externalWindow' || (withDebugger && hasNetcoredbg))) {
       await window.vsApi.console.open();
     }
 
@@ -1549,10 +1579,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   },
 
   toggleBreakpoint: (file, line) => {
-    const existing = get().breakpoints.find((b) => b.file === file && b.line === line);
+    const existing = get().breakpoints.find((b) => pathsEqual(b.file, file) && b.line === line);
     const next = existing
       ? get().breakpoints.filter((b) => b.id !== existing.id)
-      : [...get().breakpoints, { id: `${file}:${line}`, file, line, enabled: true }];
+      : [...get().breakpoints, { id: `${normalizePathKey(file)}:${line}`, file, line, enabled: true }];
     set({ breakpoints: next });
     void window.vsApi?.debug.syncBreakpoints(next);
   },
