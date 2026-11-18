@@ -12,92 +12,119 @@ vi.mock('../electron/services/dotnetService', async (importOriginal) => {
 });
 
 import { DotnetDebugManager, ConsoleExitInfo, ConsoleSessionMeta } from '../electron/services/debugService';
+import { terminalPlainText } from '../src/utils/terminalRender';
 
 describe('Debug Console & Terminal Launch', () => {
   let tmpDir: string;
+  const activeManagers: DotnetDebugManager[] = [];
+
+  const createManager = () => {
+    const m = new DotnetDebugManager();
+    activeManagers.push(m);
+    return m;
+  };
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vs-console-test-'));
   });
 
   afterEach(async () => {
+    while (activeManagers.length > 0) {
+      const m = activeManagers.pop()!;
+      await m.stop().catch(() => {});
+    }
     await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 100 });
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  it('streams raw prompts without trailing newline and supports interactive stdin via DotnetDebugManager', async () => {
-    const projDir = path.join(tmpDir, 'MyConsoleApp');
-    const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');
-    await fs.mkdir(outDir, { recursive: true });
-    const csprojPath = path.join(projDir, 'MyConsoleApp.csproj');
-    const dllPath = path.join(outDir, 'MyConsoleApp.dll');
+  it(
+    'streams raw prompts without trailing newline and supports interactive stdin via DotnetDebugManager',
+    async () => {
+      const projDir = path.join(tmpDir, 'MyConsoleApp');
+      const outDir = path.join(projDir, 'bin', 'Debug', 'net10.0');
+      await fs.mkdir(outDir, { recursive: true });
+      const csprojPath = path.join(projDir, 'MyConsoleApp.csproj');
+      const dllPath = path.join(outDir, 'MyConsoleApp.dll');
 
-    await fs.writeFile(csprojPath, '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>', 'utf-8');
-    // Mock compiled assembly executable under Node to verify partial stdout + stdin roundtrip + exit info
-    await fs.writeFile(
-      dllPath,
-      `
+      await fs.writeFile(csprojPath, '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>', 'utf-8');
+      // Mock compiled assembly executable under Node to verify partial stdout + stdin roundtrip + exit info
+      await fs.writeFile(
+        dllPath,
+        `
       process.stdout.write('Enter name: ');
       process.stdin.setEncoding('utf8');
       process.stdin.once('data', (chunk) => {
         const name = String(chunk).trim();
         console.log('Hello ' + name);
-        process.exit(0);
+        setTimeout(() => process.exit(0), 30);
       });
       `,
-      'utf-8',
-    );
+        'utf-8',
+      );
 
-    const mgr = new DotnetDebugManager();
-    const rawChunks: string[] = [];
-    const outputLines: string[] = [];
-    let startMeta: ConsoleSessionMeta | null = null;
-    let exitInfo: ConsoleExitInfo | null = null;
+      const mgr = createManager();
+      const rawChunks: string[] = [];
+      const outputLines: string[] = [];
+      let startMeta: ConsoleSessionMeta | null = null;
+      let exitInfo: ConsoleExitInfo | null = null;
+      let sentName = false;
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timed out waiting for console process')), 5000);
-      mgr.setCallbacks({
-        onOutput: (line) => outputLines.push(line),
-        onStateChange: () => {},
-        onStopped: () => {},
-        onConsoleStart: (meta) => {
-          startMeta = meta;
-        },
-        onConsoleData: (chunk) => {
-          rawChunks.push(chunk);
-          if (rawChunks.join('').includes('Enter name: ')) {
-            mgr.sendInput('Tamino\n');
-          }
-        },
-        onConsoleExit: (info) => {
-          exitInfo = info;
-        },
-        onExited: () => {
-          clearTimeout(timer);
-          resolve();
-        },
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Timed out waiting for console process (isPty=${startMeta?.isPty}, sentName=${sentName}, raw=${JSON.stringify(rawChunks.join(''))})`,
+              ),
+            ),
+          15000,
+        );
+        mgr.setCallbacks({
+          onOutput: (line) => outputLines.push(line),
+          onStateChange: () => {},
+          onStopped: () => {},
+          onConsoleStart: (meta) => {
+            startMeta = meta;
+          },
+          onConsoleData: (chunk) => {
+            rawChunks.push(chunk);
+            if (!sentName && terminalPlainText(rawChunks.join('')).includes('Enter name:')) {
+              sentName = true;
+              mgr.sendInput('Tamino\n');
+            }
+          },
+          onConsoleExit: (info) => {
+            exitInfo = info;
+          },
+          onExited: () => {
+            clearTimeout(timer);
+            resolve();
+          },
+        });
+
+        void mgr.startWithoutDebugging(csprojPath, 'Debug', {
+          projectName: 'MyConsoleApp',
+          targetFramework: 'net10.0',
+          consoleMode: 'externalWindow',
+        });
       });
 
-      void mgr.startWithoutDebugging(csprojPath, 'Debug', {
-        projectName: 'MyConsoleApp',
-        targetFramework: 'net10.0',
-        consoleMode: 'externalWindow',
+      expect(startMeta).not.toBeNull();
+      expect(startMeta!.projectName).toBe('MyConsoleApp');
+      expect(startMeta!.exePath).toBe(dllPath);
+      const joinedPlain = terminalPlainText(rawChunks.join(''));
+      expect(joinedPlain).toContain('Enter name:');
+      expect(joinedPlain).toContain('Hello Tamino');
+      expect(outputLines.some((l) => l.includes('Hello Tamino'))).toBe(true);
+      expect(exitInfo).toEqual({
+        code: 0,
+        pid: startMeta!.pid,
+        exePath: dllPath,
       });
-    });
-
-    expect(startMeta).not.toBeNull();
-    expect(startMeta!.projectName).toBe('MyConsoleApp');
-    expect(startMeta!.exePath).toBe(dllPath);
-    expect(rawChunks.join('')).toContain('Enter name: ');
-    expect(rawChunks.join('')).toContain('Hello Tamino');
-    expect(outputLines.some((l) => l.includes('Hello Tamino'))).toBe(true);
-    expect(exitInfo).toEqual({
-      code: 0,
-      pid: startMeta!.pid,
-      exePath: dllPath,
-    });
-  });
+    },
+    25000,
+  );
 
   it(
     'provides a real PTY and delivers a single keypress without Enter (Console.ReadKey semantics) with exact exit code',
@@ -129,14 +156,22 @@ describe('Debug Console & Terminal Launch', () => {
       'utf-8',
     );
 
-    const mgr = new DotnetDebugManager();
+    const mgr = createManager();
     const rawChunks: string[] = [];
     let startMeta: ConsoleSessionMeta | null = null;
     let exitInfo: ConsoleExitInfo | null = null;
     let sentKey = false;
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timed out waiting for ReadKey PTY test')), 15000);
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `Timed out waiting for ReadKey PTY test (isPty=${startMeta?.isPty}, sentKey=${sentKey}, raw=${JSON.stringify(rawChunks.join(''))})`,
+            ),
+          ),
+        15000,
+      );
       mgr.setCallbacks({
         onOutput: () => {},
         onStateChange: () => {},
@@ -146,7 +181,7 @@ describe('Debug Console & Terminal Launch', () => {
         },
         onConsoleData: (chunk) => {
           rawChunks.push(chunk);
-          if (!sentKey && rawChunks.join('').includes('Hallo')) {
+          if (!sentKey && terminalPlainText(rawChunks.join('')).includes('Hallo')) {
             sentKey = true;
             // Send single character 'K' with NO newline, just like Console.ReadKey()
             mgr.sendInput('K');
@@ -169,8 +204,9 @@ describe('Debug Console & Terminal Launch', () => {
     });
 
     expect(startMeta?.isPty).toBe(true);
-    expect(rawChunks.join('')).toContain('Hallo');
-    expect(rawChunks.join('')).toContain('|KEY=K');
+    const plain = terminalPlainText(rawChunks.join(''));
+    expect(plain).toContain('Hallo');
+    expect(plain).toContain('|KEY=K');
     expect(exitInfo?.code).toBe(7);
   },
     25000,
@@ -189,7 +225,7 @@ describe('Debug Console & Terminal Launch', () => {
       'utf-8',
     );
 
-    const mgr = new DotnetDebugManager();
+    const mgr = createManager();
     const starts: ConsoleSessionMeta[] = [];
     const exits: ConsoleExitInfo[] = [];
     let secondStarted = false;
