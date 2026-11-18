@@ -12,7 +12,9 @@ vi.mock('../electron/services/dotnetService', async (importOriginal) => {
 });
 
 import { DotnetDebugManager, ConsoleExitInfo, ConsoleSessionMeta } from '../electron/services/debugService';
-import { terminalPlainText } from '../src/utils/terminalRender';
+import { applyTerminalChunk, terminalPlainText } from '../src/utils/terminalRender';
+
+const toPlain = (chunks: string[]) => terminalPlainText(chunks.reduce((acc, c) => applyTerminalChunk(acc, c), ''));
 
 describe('Debug Console & Terminal Launch', () => {
   let tmpDir: string;
@@ -75,7 +77,7 @@ describe('Debug Console & Terminal Launch', () => {
           () =>
             reject(
               new Error(
-                `Timed out waiting for console process (isPty=${startMeta?.isPty}, sentName=${sentName}, raw=${JSON.stringify(rawChunks.join(''))})`,
+                `Timed out waiting for console process (isPty=${startMeta?.isPty}, sentName=${sentName}, plain=${JSON.stringify(toPlain(rawChunks))})`,
               ),
             ),
           15000,
@@ -89,7 +91,7 @@ describe('Debug Console & Terminal Launch', () => {
           },
           onConsoleData: (chunk) => {
             rawChunks.push(chunk);
-            if (!sentName && terminalPlainText(rawChunks.join('')).includes('Enter name:')) {
+            if (!sentName && toPlain(rawChunks).includes('Enter name:')) {
               sentName = true;
               mgr.sendInput('Tamino\n');
             }
@@ -113,7 +115,7 @@ describe('Debug Console & Terminal Launch', () => {
       expect(startMeta).not.toBeNull();
       expect(startMeta!.projectName).toBe('MyConsoleApp');
       expect(startMeta!.exePath).toBe(dllPath);
-      const joinedPlain = terminalPlainText(rawChunks.join(''));
+      const joinedPlain = toPlain(rawChunks);
       expect(joinedPlain).toContain('Enter name:');
       expect(joinedPlain).toContain('Hello Tamino');
       expect(outputLines.some((l) => l.includes('Hello Tamino'))).toBe(true);
@@ -141,7 +143,16 @@ describe('Debug Console & Terminal Launch', () => {
       `
       process.stdout.write('Hallo');
       if (!process.stdin.isTTY) {
-        console.error('NOT_TTY');
+        const fs = require('node:fs');
+        const fdInfo = [0, 1, 2].map((fd) => {
+          try {
+            const st = fs.fstatSync(fd);
+            return fd + ':' + (st.isCharacterDevice() ? 'char' : st.isFIFO() ? 'fifo' : st.isFile() ? 'file' : 'other');
+          } catch (e) {
+            return fd + ':err=' + e.code;
+          }
+        }).join(',');
+        console.error('NOT_TTY(' + fdInfo + ',outTTY=' + process.stdout.isTTY + ')');
         process.exit(99);
       }
       process.stdin.setRawMode(true);
@@ -167,7 +178,7 @@ describe('Debug Console & Terminal Launch', () => {
         () =>
           reject(
             new Error(
-              `Timed out waiting for ReadKey PTY test (isPty=${startMeta?.isPty}, sentKey=${sentKey}, raw=${JSON.stringify(rawChunks.join(''))})`,
+              `Timed out waiting for ReadKey PTY test (isPty=${startMeta?.isPty}, sentKey=${sentKey}, plain=${JSON.stringify(toPlain(rawChunks))})`,
             ),
           ),
         15000,
@@ -181,7 +192,7 @@ describe('Debug Console & Terminal Launch', () => {
         },
         onConsoleData: (chunk) => {
           rawChunks.push(chunk);
-          if (!sentKey && terminalPlainText(rawChunks.join('')).includes('Hallo')) {
+          if (!sentKey && toPlain(rawChunks).includes('Hallo')) {
             sentKey = true;
             // Send single character 'K' with NO newline, just like Console.ReadKey()
             mgr.sendInput('K');
@@ -204,7 +215,7 @@ describe('Debug Console & Terminal Launch', () => {
     });
 
     expect(startMeta?.isPty).toBe(true);
-    const plain = terminalPlainText(rawChunks.join(''));
+    const plain = toPlain(rawChunks);
     expect(plain).toContain('Hallo');
     expect(plain).toContain('|KEY=K');
     expect(exitInfo?.code).toBe(7);
