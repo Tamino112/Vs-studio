@@ -161,6 +161,9 @@ export interface IdeState {
   editorZoom: number;
   consoleLaunchMode: ConsoleLaunchMode;
   autoCloseConsole: boolean;
+  consoleWindowOpen: boolean;
+  terminalSessionOpen: boolean;
+  terminalResetNonce: number;
   pendingTerminalCommand: { id: number; command: string; cwd: string } | null;
 
   envStatus: EnvironmentStatus | null;
@@ -248,6 +251,10 @@ export interface IdeState {
   setEditorZoom: (zoom: number) => void;
   setConsoleLaunchMode: (mode: ConsoleLaunchMode) => void;
   setAutoCloseConsole: (enabled: boolean) => void;
+  setConsoleWindowOpen: (open: boolean) => void;
+  setTerminalSessionOpen: (open: boolean) => void;
+  closeTerminalSession: () => Promise<void>;
+  closeActiveTerminalOrConsole: () => Promise<void>;
   consumePendingTerminalCommand: () => void;
   setScreen: (screen: 'start' | 'ide') => void;
 
@@ -356,7 +363,10 @@ const savedAutoCloseConsole = localStorage.getItem('vs.autoCloseConsole') === 't
 const savedFontSize = Number(localStorage.getItem('vs.fontSize')) || 13;
 const savedWordWrap = localStorage.getItem('vs.wordWrap') === 'true';
 const savedMinimap = localStorage.getItem('vs.minimap') !== 'false';
-const savedEditorZoom = Number(localStorage.getItem('vs.editorZoom')) || 100;
+const savedEditorZoom = Math.max(
+  25,
+  Math.min(400, Math.round(Number(localStorage.getItem('vs.editorZoom')) || 100)),
+);
 applyThemeToDom(savedTheme);
 
 // Guards against F5 key-repeat / menu + shortcut double launches
@@ -385,6 +395,9 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   editorZoom: savedEditorZoom,
   consoleLaunchMode: savedConsoleMode,
   autoCloseConsole: savedAutoCloseConsole,
+  consoleWindowOpen: false,
+  terminalSessionOpen: false,
+  terminalResetNonce: 0,
   pendingTerminalCommand: null,
 
   envStatus: null,
@@ -460,12 +473,18 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
   initApp: async () => {
     if (!window.vsApi) return;
-    const [env, templates, recent] = await Promise.all([
+    const [env, templates, recent, consoleOpen] = await Promise.all([
       window.vsApi.env.detect(),
       window.vsApi.env.templates(),
       window.vsApi.recent.list(),
+      window.vsApi.console.isOpen ? window.vsApi.console.isOpen() : Promise.resolve(false),
     ]);
-    set({ envStatus: env, templates, recentSolutions: recent });
+    set({
+      envStatus: env,
+      templates,
+      recentSolutions: recent,
+      consoleWindowOpen: Boolean(consoleOpen),
+    });
   },
 
   refreshEnvironment: async () => {
@@ -516,7 +535,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     set({ colorizeTabsByProject });
   },
   setEditorZoom: (editorZoom) => {
-    const z = Math.max(50, Math.min(200, editorZoom));
+    const z = Math.max(25, Math.min(400, Math.round(editorZoom)));
     localStorage.setItem('vs.editorZoom', String(z));
     set({ editorZoom: z });
   },
@@ -527,6 +546,37 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   setAutoCloseConsole: (autoCloseConsole) => {
     localStorage.setItem('vs.autoCloseConsole', String(autoCloseConsole));
     set({ autoCloseConsole });
+  },
+  setConsoleWindowOpen: (consoleWindowOpen) => set({ consoleWindowOpen }),
+  setTerminalSessionOpen: (terminalSessionOpen) => set({ terminalSessionOpen }),
+  closeTerminalSession: async () => {
+    try {
+      await window.vsApi?.terminal.kill('main-terminal');
+    } catch {
+      // ignore
+    }
+    set((s) => ({
+      terminalSessionOpen: false,
+      terminalResetNonce: s.terminalResetNonce + 1,
+      bottomOpen: s.bottomPanel === 'terminal' ? false : s.bottomOpen,
+      statusText: 'Ready',
+    }));
+  },
+  closeActiveTerminalOrConsole: async () => {
+    if (get().debugState !== 'stopped') {
+      await get().stopDebugging();
+    }
+    if (get().consoleWindowOpen) {
+      try {
+        await window.vsApi?.console.close();
+      } catch {
+        // ignore
+      }
+      set({ consoleWindowOpen: false });
+    }
+    if (get().terminalSessionOpen || (get().bottomOpen && get().bottomPanel === 'terminal')) {
+      await get().closeTerminalSession();
+    }
   },
   consumePendingTerminalCommand: () => set({ pendingTerminalCommand: null }),
   setScreen: (screen) => set({ screen }),

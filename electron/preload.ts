@@ -133,6 +133,7 @@ export const vsApi = {
   console: {
     open: () => ipcRenderer.invoke('console:open'),
     close: () => ipcRenderer.invoke('console:close'),
+    isOpen: () => ipcRenderer.invoke('console:isOpen'),
     getSnapshot: () => ipcRenderer.invoke('console:getSnapshot'),
   },
   terminal: {

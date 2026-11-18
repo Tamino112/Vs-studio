@@ -1,4 +1,4 @@
-import { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { ChildProcessWithoutNullStreams, execFileSync } from 'node:child_process';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -83,7 +83,19 @@ export class TerminalManager {
     const s = this.sessions.get(id);
     if (s) {
       try {
-        s.proc.kill();
+        if (process.platform === 'win32' && s.proc.pid && s.proc.exitCode === null && s.proc.signalCode === null) {
+          try {
+            execFileSync('taskkill', ['/PID', String(s.proc.pid), '/T', '/F'], {
+              stdio: 'ignore',
+              timeout: 3000,
+              windowsHide: true,
+            });
+          } catch {
+            s.proc.kill();
+          }
+        } else {
+          s.proc.kill();
+        }
       } catch {
         // ignore
       }

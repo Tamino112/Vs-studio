@@ -547,5 +547,41 @@ describe('Debug Console & Terminal Launch', () => {
     useIdeStore.getState().closeTabsUnderPath('c:/repo/apprenamed');
     expect(useIdeStore.getState().openTabs.some((t) => t.path.includes('AppRenamed'))).toBe(false);
     expect(useIdeStore.getState().breakpoints).toHaveLength(0);
+
+    // 6. Editor zoom clamps to 25..400% and rounds wheel increments
+    useIdeStore.getState().setEditorZoom(110.4);
+    expect(useIdeStore.getState().editorZoom).toBe(110);
+    useIdeStore.getState().setEditorZoom(10);
+    expect(useIdeStore.getState().editorZoom).toBe(25);
+    useIdeStore.getState().setEditorZoom(999);
+    expect(useIdeStore.getState().editorZoom).toBe(400);
+    useIdeStore.getState().setEditorZoom(100);
+
+    // 7. closeActiveTerminalOrConsole stops running session and closes open console/terminal
+    const consoleClose = vi.fn(async () => {});
+    const debugStop = vi.fn(async () => {});
+    const terminalKill = vi.fn(async () => {});
+    (globalThis as unknown as { window: Record<string, unknown> }).window.vsApi = {
+      platform: 'win32',
+      debug: { stop: debugStop },
+      console: { open: consoleOpen, close: consoleClose },
+      terminal: { kill: terminalKill },
+    };
+    useIdeStore.setState({
+      debugState: 'running',
+      consoleWindowOpen: true,
+      terminalSessionOpen: true,
+      bottomOpen: true,
+      bottomPanel: 'terminal',
+    });
+    const prevResetNonce = useIdeStore.getState().terminalResetNonce;
+    await useIdeStore.getState().closeActiveTerminalOrConsole();
+    expect(debugStop).toHaveBeenCalledTimes(1);
+    expect(consoleClose).toHaveBeenCalledTimes(1);
+    expect(terminalKill).toHaveBeenCalledWith('main-terminal');
+    expect(useIdeStore.getState().consoleWindowOpen).toBe(false);
+    expect(useIdeStore.getState().terminalSessionOpen).toBe(false);
+    expect(useIdeStore.getState().bottomOpen).toBe(false);
+    expect(useIdeStore.getState().terminalResetNonce).toBe(prevResetNonce + 1);
   });
 });

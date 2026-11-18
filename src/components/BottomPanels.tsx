@@ -326,7 +326,13 @@ function formatTerminalCdAndRun(cwd: string, command: string): string {
 }
 
 export const TerminalPanel: React.FC = () => {
-  const { solution, pendingTerminalCommand, consumePendingTerminalCommand } = useIdeStore();
+  const {
+    solution,
+    pendingTerminalCommand,
+    consumePendingTerminalCommand,
+    setTerminalSessionOpen,
+    closeTerminalSession,
+  } = useIdeStore();
   const initialBanner =
     window.vsApi?.platform === 'win32'
       ? 'Initializing Windows Developer Command Prompt...\n'
@@ -347,6 +353,7 @@ export const TerminalPanel: React.FC = () => {
     void window.vsApi.terminal.create(termId, cwd).then(() => {
       if (cancelled) return;
       terminalReadyRef.current = true;
+      useIdeStore.getState().setTerminalSessionOpen(true);
       const pending = useIdeStore.getState().pendingTerminalCommand;
       if (pending && pending.id !== lastCmdIdRef.current) {
         lastCmdIdRef.current = pending.id;
@@ -373,13 +380,21 @@ export const TerminalPanel: React.FC = () => {
         }
       }
     });
+    const unsubExit = window.vsApi.on('terminal:exit', (payload) => {
+      const p = payload as { id: string; code: number };
+      if (p.id === termId) {
+        setTerminalSessionOpen(false);
+      }
+    });
     return () => {
       cancelled = true;
       terminalReadyRef.current = false;
+      setTerminalSessionOpen(false);
       unsubData();
+      unsubExit();
       void window.vsApi.terminal.kill(termId);
     };
-  }, [solution?.dir]);
+  }, [solution?.dir, setTerminalSessionOpen]);
 
   useEffect(() => {
     if (!pendingTerminalCommand || !terminalReadyRef.current) return;
@@ -401,6 +416,58 @@ export const TerminalPanel: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          padding: '4px 10px',
+          borderBottom: '1px solid var(--vs-border)',
+          background: 'var(--vs-bg-panel)',
+          fontSize: 11.5,
+        }}
+      >
+        <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span className="codicon codicon-terminal" />
+          <span>{window.vsApi?.platform === 'win32' ? 'Developer Command Prompt' : 'Developer Terminal'}</span>
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button
+            className="vs-btn vs-btn-secondary"
+            style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+            title="Send Ctrl+C to running program"
+            onClick={() => void window.vsApi?.terminal.write(termId, '\x03')}
+          >
+            Stop (Ctrl+C)
+          </button>
+          <button
+            className="vs-btn vs-btn-secondary"
+            style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+            title="Clear terminal output"
+            onClick={() => {
+              termOutputRef.current = '';
+              setTermOutput('');
+            }}
+          >
+            Clear
+          </button>
+          <button
+            className="vs-btn vs-btn-secondary"
+            style={{
+              height: 22,
+              padding: '0 8px',
+              fontSize: 11,
+              color: 'var(--vs-stop-red)',
+              borderColor: 'rgba(241, 76, 76, 0.35)',
+            }}
+            title="Close Terminal and terminate running process"
+            onClick={() => void closeTerminalSession()}
+          >
+            Close Terminal
+          </button>
+        </div>
+      </div>
       <div
         ref={outRef}
         className="mono"

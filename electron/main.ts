@@ -155,7 +155,10 @@ function openOrFocusDebugConsoleWindow(): void {
 
   debugConsoleWindow.on('closed', () => {
     debugConsoleWindow = null;
+    sendToRenderer('console:windowState', false);
   });
+
+  sendToRenderer('console:windowState', true);
 }
 
 function createWindow(): void {
@@ -645,6 +648,7 @@ function registerIpc(): void {
       debugConsoleWindow.close();
     }
   });
+  ipcMain.handle('console:isOpen', () => Boolean(debugConsoleWindow && !debugConsoleWindow.isDestroyed()));
   ipcMain.handle('console:getSnapshot', () => currentConsoleSnapshot);
 
   // Terminal

@@ -79,6 +79,7 @@ export class DotnetDebugManager {
   private runIsPty = false;
   private dapProc: ChildProcessWithoutNullStreams | null = null;
   private externalWinPids = new Set<number>();
+  private externalWinPollTimer: NodeJS.Timeout | null = null;
   private dapBuffer = Buffer.alloc(0);
   private seq = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -178,7 +179,7 @@ export class DotnetDebugManager {
     projectName?: string;
     targetFramework?: string;
     configuration: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const dotnetBin = await getDotnetBin();
     const cwd = path.dirname(params.csprojPath);
     const projName = params.projectName || path.basename(params.csprojPath, '.csproj');
@@ -219,7 +220,9 @@ export class DotnetDebugManager {
     const winProc = spawnDetachedNewConsole(batPath, [], { cwd, env });
     if (winProc) {
       this.externalWinPids.add(winProc.pid);
-      return;
+      this.currentPid = winProc.pid;
+      this.startExternalWinPoll();
+      return true;
     }
 
     const opener = spawn(
@@ -234,6 +237,7 @@ export class DotnetDebugManager {
       },
     );
     opener.unref();
+    return false;
   }
 
   async startWithoutDebugging(
@@ -264,13 +268,20 @@ export class DotnetDebugManager {
         return;
       }
       if (process.platform === 'win32') {
-        await this.launchInWindowsTerminal({
+        this.currentExePath = dllPath;
+        this.consoleExitedEmitted = false;
+        this.exitedEmitted = false;
+        this.lineRemainder = '';
+        this.callbacks?.onStateChange('running');
+        const tracked = await this.launchInWindowsTerminal({
           csprojPath,
           projectName: projName,
           targetFramework: tfm,
           configuration,
         });
-        this.callbacks?.onStateChange('stopped');
+        if (!tracked) {
+          this.callbacks?.onStateChange('stopped');
+        }
         return;
       }
     }
@@ -587,7 +598,48 @@ export class DotnetDebugManager {
     this.callbacks?.onExited(code);
   }
 
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === 'EPERM';
+    }
+  }
+
+  private clearExternalWinPoll(): void {
+    if (this.externalWinPollTimer) {
+      clearInterval(this.externalWinPollTimer);
+      this.externalWinPollTimer = null;
+    }
+  }
+
+  private startExternalWinPoll(): void {
+    this.clearExternalWinPoll();
+    this.externalWinPollTimer = setInterval(() => {
+      if (this.externalWinPids.size === 0) {
+        this.clearExternalWinPoll();
+        return;
+      }
+      for (const pid of [...this.externalWinPids]) {
+        if (!this.isPidAlive(pid)) {
+          this.externalWinPids.delete(pid);
+        }
+      }
+      if (this.externalWinPids.size === 0) {
+        this.clearExternalWinPoll();
+        if (!this.runProc && !this.dapProc) {
+          this.callbacks?.onStateChange('stopped');
+          this.callbacks?.onOutput('[Windows Console closed]');
+          this.emitExited(0);
+        }
+      }
+    }, 350);
+    this.externalWinPollTimer.unref?.();
+  }
+
   private killExternalWinPids(): void {
+    this.clearExternalWinPoll();
     if (process.platform !== 'win32' || this.externalWinPids.size === 0) {
       this.externalWinPids.clear();
       return;
@@ -633,7 +685,7 @@ export class DotnetDebugManager {
 
   async stop(): Promise<void> {
     this.sessionToken++;
-    const hadSession = Boolean(this.runProc || this.dapProc);
+    const hadSession = Boolean(this.runProc || this.dapProc || this.externalWinPids.size > 0);
     if (this.runProc) {
       killProcTree(this.runProc);
       this.runProc = null;

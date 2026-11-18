@@ -22,6 +22,11 @@ export const StandardToolbar: React.FC = () => {
     stepOut,
     debugState,
     isBuilding,
+    consoleWindowOpen,
+    terminalSessionOpen,
+    bottomOpen,
+    bottomPanel,
+    closeActiveTerminalOrConsole,
     setDialog,
     leftOpen,
     rightOpen,
@@ -33,6 +38,8 @@ export const StandardToolbar: React.FC = () => {
     dispatchEditorCommand,
   } = useIdeStore();
 
+  const hasOpenTerminalOrConsole =
+    consoleWindowOpen || terminalSessionOpen || (bottomOpen && bottomPanel === 'terminal');
   const activeTab = openTabs.find((t) => t.id === activeTabId);
   const isCodeTab = Boolean(activeTab && activeTab.kind === 'code');
   const canGoBack = navIndex > 0;
@@ -222,6 +229,15 @@ export const StandardToolbar: React.FC = () => {
             disabled={!startupProject || isBuilding}
             onClick={() => void startDebugging(false)}
           />
+
+          {hasOpenTerminalOrConsole && (
+            <ToolbarIconBtn
+              icon="codicon-close"
+              iconColor="var(--vs-stop-red)"
+              title="Close Open Terminal / Console"
+              onClick={() => void closeActiveTerminalOrConsole()}
+            />
+          )}
         </div>
       ) : (
         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -245,6 +261,12 @@ export const StandardToolbar: React.FC = () => {
             iconColor="var(--vs-stop-red)"
             title="Stop Debugging (Shift+F5)"
             onClick={() => void stopDebugging()}
+          />
+          <ToolbarIconBtn
+            icon="codicon-close"
+            iconColor="var(--vs-stop-red)"
+            title="Close Open Terminal / Console"
+            onClick={() => void closeActiveTerminalOrConsole()}
           />
           <ToolbarIconBtn
             icon="codicon-debug-restart"

@@ -437,7 +437,7 @@ function ensureCSharpProviders() {
   });
 }
 
-const ZOOM_LEVELS = [50, 70, 85, 100, 115, 125, 150, 175, 200];
+const ZOOM_LEVELS = [25, 50, 70, 85, 100, 115, 125, 150, 175, 200, 250, 300, 400];
 
 export const CodeEditorPane: React.FC = () => {
   const { splitMode, openTabs } = useIdeStore();
@@ -572,7 +572,11 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
 
   const monacoThemeName = theme === 'dark' ? 'vs-community-dark' : 'vs-community-light';
-  const effectiveFontSize = Math.max(8, Math.round(fontSize * (editorZoom / 100)));
+  const effectiveFontSize = Math.max(6, Math.round(fontSize * (editorZoom / 100)));
+  const zoomOptions = useMemo(
+    () => Array.from(new Set([...ZOOM_LEVELS, editorZoom])).sort((a, b) => a - b),
+    [editorZoom],
+  );
 
   // Dismiss popups on outside click
   useEffect(() => {
@@ -589,9 +593,20 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
   // Initialize standalone code editor per document group
   useEffect(() => {
     ensureCSharpProviders();
-    if (!editorContainerRef.current) return;
+    const containerEl = editorContainerRef.current;
+    if (!containerEl) return;
 
-    const editor = monaco.editor.create(editorContainerRef.current, {
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const cur = useIdeStore.getState().editorZoom;
+      useIdeStore.getState().setEditorZoom(cur + (e.deltaY < 0 ? 10 : -10));
+    };
+    containerEl.addEventListener('wheel', onWheel, { passive: false, capture: true });
+
+    const editor = monaco.editor.create(containerEl, {
       model: null,
       theme: monacoThemeName,
       fontSize: effectiveFontSize,
@@ -736,6 +751,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     });
 
     return () => {
+      containerEl.removeEventListener('wheel', onWheel, { capture: true });
       editor.setModel(null);
       editor.dispose();
       editorRef.current = null;
@@ -984,8 +1000,20 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
 
   // Diff editor support
   useEffect(() => {
-    if (activeTab?.kind !== 'diff' || !diffContainerRef.current) return;
-    const diffEditor = monaco.editor.createDiffEditor(diffContainerRef.current, {
+    const containerEl = diffContainerRef.current;
+    if (activeTab?.kind !== 'diff' || !containerEl) return;
+
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const cur = useIdeStore.getState().editorZoom;
+      useIdeStore.getState().setEditorZoom(cur + (e.deltaY < 0 ? 10 : -10));
+    };
+    containerEl.addEventListener('wheel', onWheel, { passive: false, capture: true });
+
+    const diffEditor = monaco.editor.createDiffEditor(containerEl, {
       automaticLayout: true,
       readOnly: true,
       theme: monacoThemeName,
@@ -996,11 +1024,13 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     diffEditor.setModel({ original: origModel, modified: modModel });
     diffEditorRef.current = diffEditor;
     return () => {
+      containerEl.removeEventListener('wheel', onWheel, { capture: true });
       diffEditor.dispose();
       origModel.dispose();
       modModel.dispose();
       diffEditorRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeTab?.id,
     activeTab?.kind,
@@ -1008,8 +1038,11 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
     activeTab?.diffModified,
     activeTab?.language,
     monacoThemeName,
-    effectiveFontSize,
   ]);
+
+  useEffect(() => {
+    diffEditorRef.current?.updateOptions({ fontSize: effectiveFontSize });
+  }, [effectiveFontSize]);
 
   // Parse C# types & members for 3-Part Navigation Bar
   const outlineTypes = useMemo(() => {
@@ -1690,7 +1723,7 @@ const DocumentGroupPane: React.FC<{ groupId: number }> = ({ groupId }) => {
               className="vs-select"
               style={{ border: 'none', height: 21, fontSize: 11, padding: '0 6px', background: 'transparent' }}
             >
-              {ZOOM_LEVELS.map((z) => (
+              {zoomOptions.map((z) => (
                 <option key={z} value={z}>
                   {z} %
                 </option>

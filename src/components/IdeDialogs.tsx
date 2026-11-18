@@ -445,11 +445,15 @@ export const ToolsOptionsDialog: React.FC = () => {
               onChange={(e) => setEditorZoom(Number(e.target.value))}
               style={{ width: 110 }}
             >
-              {[50, 70, 85, 100, 115, 125, 150, 175, 200].map((z) => (
-                <option key={z} value={z}>
-                  {z} %
-                </option>
-              ))}
+              {Array.from(
+                new Set([25, 50, 70, 85, 100, 115, 125, 150, 175, 200, 250, 300, 400, editorZoom]),
+              )
+                .sort((a, b) => a - b)
+                .map((z) => (
+                  <option key={z} value={z}>
+                    {z} %
+                  </option>
+                ))}
             </select>
 
             <span>Word Wrap:</span>

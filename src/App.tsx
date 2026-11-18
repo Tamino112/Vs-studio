@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { selectAllEffectiveDiagnostics, useIdeStore } from './store/useIdeStore';
 import { StartWindow } from './components/StartWindow';
 import { NewProjectWizard } from './components/NewProjectWizard';
@@ -44,14 +44,22 @@ export const App: React.FC = () => {
 
 const MainIdeApp: React.FC = () => {
   const store = useIdeStore();
-  // Lazily mount the integrated terminal the first time it is shown, then keep it alive
   const [terminalEverShown, setTerminalEverShown] = useState(false);
+  const lastTerminalResetRef = useRef(store.terminalResetNonce);
   useEffect(() => {
-    if (store.bottomOpen && store.bottomPanel === 'terminal') setTerminalEverShown(true);
-  }, [store.bottomOpen, store.bottomPanel]);
-  useEffect(() => {
-    if (!store.solution) setTerminalEverShown(false);
-  }, [store.solution]);
+    if (store.terminalResetNonce !== lastTerminalResetRef.current) {
+      lastTerminalResetRef.current = store.terminalResetNonce;
+      setTerminalEverShown(false);
+      return;
+    }
+    if (!store.solution) {
+      setTerminalEverShown(false);
+      return;
+    }
+    if (store.bottomOpen && store.bottomPanel === 'terminal') {
+      setTerminalEverShown(true);
+    }
+  }, [store.solution, store.terminalResetNonce, store.bottomOpen, store.bottomPanel]);
 
   useEffect(() => {
     void store.initApp();
@@ -65,6 +73,9 @@ const MainIdeApp: React.FC = () => {
       window.vsApi.on('lsp:diagnostics', (payload) => {
         const p = payload as { file: string; diagnostics: DiagnosticItem[] };
         useIdeStore.getState().setLspDiagnostics(p.file, p.diagnostics);
+      }),
+      window.vsApi.on('console:windowState', (isOpen) => {
+        useIdeStore.getState().setConsoleWindowOpen(Boolean(isOpen));
       }),
       window.vsApi.on('debug:state', (state) => {
         useIdeStore.setState({ debugState: state as 'stopped' | 'running' | 'paused' });
@@ -191,12 +202,15 @@ const MainIdeApp: React.FC = () => {
         e.preventDefault();
         const isTerminalShowing = s.bottomOpen && s.bottomPanel === 'terminal';
         s.setDock({ bottomOpen: !isTerminalShowing, bottomPanel: 'terminal' });
-      } else if (mod && (e.key === '=' || e.key === '+')) {
+      } else if ((e.ctrlKey || mod) && !e.altKey && (e.key === '=' || e.key === '+' || e.code === 'NumpadAdd')) {
         e.preventDefault();
-        s.setEditorZoom(s.editorZoom + 15);
-      } else if (mod && e.key === '-') {
+        s.setEditorZoom(s.editorZoom + 10);
+      } else if ((e.ctrlKey || mod) && !e.altKey && (e.key === '-' || e.code === 'NumpadSubtract')) {
         e.preventDefault();
-        s.setEditorZoom(s.editorZoom - 15);
+        s.setEditorZoom(s.editorZoom - 10);
+      } else if ((e.ctrlKey || mod) && !e.altKey && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) {
+        e.preventDefault();
+        s.setEditorZoom(100);
       } else if (e.key === 'F9' && !inEditor) {
         e.preventDefault();
         s.dispatchEditorCommand('toggleBreakpoint');
